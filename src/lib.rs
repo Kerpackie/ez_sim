@@ -111,6 +111,12 @@ pub struct SystemConfig {
     pub psu_step_delay: u32,
     pub power_up_delay: u32,
     pub set_point_enabled: bool,
+    // Clock configuration
+    pub clocks_required: bool,
+    pub clocks_restart_required: bool,
+    pub clocks_restart_time: u32,
+    pub clk32_mon_filter: u32,
+    pub clk64_mon_filter: u32,
 }
 
 // The main struct that holds the entire state of the simulated driver board.
@@ -226,6 +232,10 @@ impl Simulator {
                     }
                     'A' => {
                         self.handle_a_command(content)?;
+                        return Ok(None); // Data commands are silent
+                    }
+                    'F' => {
+                        self.handle_f_command(content)?;
                         return Ok(None); // Data commands are silent
                     }
                     _ => {} // Fall through to 'C' command check
@@ -477,6 +487,35 @@ impl Simulator {
         self.driver_data_checksum += sram1 + sram2 + sram3 + sram5 + sram6 + sram7;
         Ok(())
     }
+
+    /// Parses an 'F' command, updates clock config, and updates the checksum.
+    fn handle_f_command(&mut self, content: &str) -> Result<(), CommandError> {
+        if content.len() < 18 { return Err(CommandError::TooShort); }
+        let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
+
+        let sram9 = parse_hex(3, 4)?;
+        let sram8 = parse_hex(4, 5)?;
+        let sram7 = parse_hex(5, 7)?;
+        let sram6 = parse_hex(7, 9)?;
+        let _sram5 = parse_hex(9, 10)?;
+        let sram4 = parse_hex(10, 12)?;
+        let sram3 = parse_hex(12, 14)?;
+        let sram2 = parse_hex(14, 16)?;
+        let sram1 = parse_hex(16, 18)?;
+
+        self.system_config.clocks_restart_required = sram8 == 1;
+        self.system_config.clocks_restart_time = (sram6 + (sram7 << 8)) * 60;
+        self.system_config.clk32_mon_filter = !(sram1 + (sram2 << 8));
+        self.system_config.clk64_mon_filter = !(sram3 + (sram4 << 8));
+        self.system_config.clocks_required = sram9 == 1;
+
+        // The C code's checksum for 'F' is character-by-character.
+        let checksum_chars = &content[3..18];
+        self.driver_data_checksum += checksum_chars.chars().fold(0, |acc, c| {
+            acc + c.to_digit(16).unwrap_or(0)
+        });
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -725,6 +764,29 @@ mod tests {
         let config = &sim.system_config;
         assert_eq!(config.power_up_delay, 10);
         assert_eq!(config.set_point_enabled, true);
+
+        let end_response = sim.process_command("<C1F5003>").unwrap();
+        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+    }
+
+    #[test]
+    fn f_command_updates_clock_config() {
+        let mut sim = Simulator::new(0x1F);
+        sim.process_command("<C1F5002>").unwrap();
+
+        // Fxx<s9=1><s8=1><s7=00><s6=0A><s5=0><s4=CD><s3=AB><s2=FF><s1=FF>
+        let f_command = "<Fxx11000A0CDABFFFF>";
+
+        let expected_checksum = "11000A0CDABFFFF".chars().fold(0, |acc, c| acc + c.to_digit(16).unwrap());
+
+        sim.process_command(f_command).unwrap();
+
+        let config = &sim.system_config;
+        assert_eq!(config.clocks_required, true);
+        assert_eq!(config.clocks_restart_required, true);
+        assert_eq!(config.clocks_restart_time, 600); // 10 * 60
+        assert_eq!(config.clk32_mon_filter, !0xFFFF);
+        assert_eq!(config.clk64_mon_filter, !0xCDAB);
 
         let end_response = sim.process_command("<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));

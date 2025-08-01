@@ -102,6 +102,9 @@ pub struct Simulator {
     pub clock_generators: [ClockGenerator; 4],
     // Two Sine Wave modules (SW1_Present, SW2_Present).
     pub sine_waves: [SineWave; 2],
+    // Timer and Alarm values
+    pub timer_values: [u32; 4],
+    pub alarm_values: [u32; 4],
     // --- Internal state for data loading sessions ---
     sram_address: u32,
     pattern_data_checksum: u32,
@@ -119,6 +122,8 @@ impl Simulator {
             fpgas: Default::default(),
             clock_generators: Default::default(),
             sine_waves: Default::default(),
+            timer_values: [0; 4],
+            alarm_values: [0; 4],
             sram_address: 1,
             pattern_data_checksum: 0,
             driver_data_checksum: 0,
@@ -174,6 +179,10 @@ impl Simulator {
                     }
                     'Q' => {
                         self.handle_q_command(content)?;
+                        return Ok(None); // Data commands are silent
+                    }
+                    'T' => {
+                        self.handle_t_command(content)?;
                         return Ok(None); // Data commands are silent
                     }
                     // 'D', etc. will be handled here
@@ -268,7 +277,6 @@ impl Simulator {
         let sram3_cal_v = parse_hex(9, 13)?;
         let sram2_low_v = parse_hex(13, 16)?;
         let sram1_high_v = parse_hex(16, 19)?;
-        let sram7_gain_mult = parse_hex(19, 20)?;
         let sram8_vmon_mult = parse_hex(20, 21)?;
 
         // PSU number in C code is 1-based, our array is 0-based.
@@ -280,11 +288,36 @@ impl Simulator {
             let vmon_divisor = if sram8_vmon_mult == 1 { 1.0 } else { 10.0 };
             psu.high_voltage_limit = sram1_high_v as f32 / vmon_divisor;
             psu.low_voltage_limit = sram2_low_v as f32 / vmon_divisor;
-
-            // TODO: Implement gain multiplier logic if needed for state.
         }
 
         self.driver_data_checksum += sram1_high_v + sram2_low_v + sram3_cal_v + sram4_seq_id as u32 + sram5_delay + sram6_psu_num as u32;
+        Ok(())
+    }
+
+    /// Parses a 'T' command, updates timer state, and updates the checksum.
+    fn handle_t_command(&mut self, content: &str) -> Result<(), CommandError> {
+        if content.len() < 19 { return Err(CommandError::TooShort); }
+        let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
+
+        let sram8 = parse_hex(3, 5)?;
+        let sram7 = parse_hex(5, 7)?;
+        let sram6 = parse_hex(7, 9)?;
+        let sram5 = parse_hex(9, 11)?;
+        let sram4 = parse_hex(11, 13)?;
+        let sram3 = parse_hex(13, 15)?;
+        let sram2 = parse_hex(15, 17)?;
+        let sram1 = parse_hex(17, 19)?;
+
+        self.timer_values[0] = sram1;
+        self.timer_values[1] = sram2;
+        self.timer_values[2] = sram3;
+        self.timer_values[3] = sram4;
+        self.alarm_values[0] = sram5;
+        self.alarm_values[1] = sram6;
+        self.alarm_values[2] = sram7;
+        self.alarm_values[3] = sram8;
+
+        self.driver_data_checksum += sram1 + sram2 + sram3 + sram4 + sram5 + sram6 + sram7 + sram8;
         Ok(())
     }
 }
@@ -419,6 +452,29 @@ mod tests {
         assert_eq!(psu.low_voltage_limit, 12.5);  // 0x7D = 125, divided by 10
 
         // Check checksum
+        let end_response = sim.process_command("<C1F5003>").unwrap();
+        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+    }
+
+    #[test]
+    fn t_command_updates_timer_and_checksum() {
+        let mut sim = Simulator::new(0x1F);
+        sim.process_command("<C1F5002>").unwrap();
+
+        // T<sram8>...<sram1>
+        // Txx<08><07><06><05><04><03><02><01>
+        let t_command = "<Txx0807060504030201>";
+
+        let s1 = 0x01; let s2 = 0x02; let s3 = 0x03; let s4 = 0x04;
+        let s5 = 0x05; let s6 = 0x06; let s7 = 0x07; let s8 = 0x08;
+        let expected_checksum = s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8;
+
+        let response = sim.process_command(t_command).unwrap();
+        assert_eq!(response, None); // Silent
+
+        assert_eq!(sim.timer_values, [s1, s2, s3, s4]);
+        assert_eq!(sim.alarm_values, [s5, s6, s7, s8]);
+
         let end_response = sim.process_command("<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
     }

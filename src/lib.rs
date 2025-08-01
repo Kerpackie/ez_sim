@@ -109,6 +109,8 @@ pub struct SystemConfig {
     pub stop_on_temp_error: bool,
     pub psu_step_enabled: bool,
     pub psu_step_delay: u32,
+    pub power_up_delay: u32,
+    pub set_point_enabled: bool,
 }
 
 // The main struct that holds the entire state of the simulated driver board.
@@ -220,6 +222,10 @@ impl Simulator {
                     }
                     'E' => {
                         self.handle_e_command(content)?;
+                        return Ok(None); // Data commands are silent
+                    }
+                    'A' => {
+                        self.handle_a_command(content)?;
                         return Ok(None); // Data commands are silent
                     }
                     _ => {} // Fall through to 'C' command check
@@ -449,6 +455,28 @@ impl Simulator {
         self.driver_data_checksum += sram1 + sram2 + sram3 + sram4 + sram5 + sram6 + sram7 + sram8 + sram9;
         Ok(())
     }
+
+    /// Parses an 'A' command, updates system config, and updates the checksum.
+    fn handle_a_command(&mut self, content: &str) -> Result<(), CommandError> {
+        if content.len() < 19 { return Err(CommandError::TooShort); }
+        let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
+
+        let sram1 = parse_hex(7, 11)?;
+        let sram2 = parse_hex(4, 7)?;
+        let sram3 = parse_hex(3, 4)?;
+        let _sram4 = parse_hex(11, 13)?; // This value is parsed but not used in the checksum.
+        let sram5 = parse_hex(15, 19)?;
+        let sram6 = parse_hex(14, 15)?;
+        let sram7 = parse_hex(17, 19)?; // C bug: re-parses last 2 digits of sram5
+
+        // Only a subset of parsed values are used to update state.
+        self.system_config.power_up_delay = sram5;
+        self.system_config.set_point_enabled = sram6 == 1;
+
+        // The C code checksum includes the buggy sram7 but not sram4.
+        self.driver_data_checksum += sram1 + sram2 + sram3 + sram5 + sram6 + sram7;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -669,6 +697,34 @@ mod tests {
         assert_eq!(config.auto_reset_retries, 5);
         assert_eq!(config.psu_step_enabled, true);
         assert_eq!(config.psu_step_delay, 500);
+
+        let end_response = sim.process_command("<C1F5003>").unwrap();
+        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+    }
+
+    #[test]
+    fn a_command_updates_system_config() {
+        let mut sim = Simulator::new(0x1F);
+        sim.process_command("<C1F5002>").unwrap();
+
+        // Axx<s3=1><s2=064><s1=00C8><s4=00><s6=1><s5=000A><padding=00>
+        let a_command = "<Axx106400C80001000A00>";
+
+        let s1 = 0x00C8; // cal_temp
+        let s2 = 0x064;  // offset
+        let s3 = 1;      // pos_neg
+        let _s4 = 0x00;   // Unused field from command string
+        let s5 = 0x000A; // pwr_up_delay
+        let s6 = 1;      // set_pt_enabled
+        let s7 = 0x0A;   // Buggy re-parse of last two digits of s5
+        // NOTE: The C code bug does NOT include s4 in the checksum but DOES include s7.
+        let expected_checksum = s1 + s2 + s3 + s5 + s6 + s7;
+
+        sim.process_command(a_command).unwrap();
+
+        let config = &sim.system_config;
+        assert_eq!(config.power_up_delay, 10);
+        assert_eq!(config.set_point_enabled, true);
 
         let end_response = sim.process_command("<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));

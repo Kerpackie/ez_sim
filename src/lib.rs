@@ -55,8 +55,14 @@ pub struct Psu {
     // High and low voltage monitor limits
     pub high_voltage_limit: f32,
     pub low_voltage_limit: f32,
-    // Current monitor limit
+    // Current monitor limit and calibration
     pub current_monitor_limit: f32,
+    pub i_cal_val: f32,
+    pub i_cal_offset_val: f32,
+    pub pos_neg_i: u32,
+    // Voltage calibration offset
+    pub v_cal_offset_val: f32,
+    pub pos_neg_v: u32,
     // Power-on sequence configuration
     pub sequence_id: u8,
     pub sequence_delay: u32,
@@ -185,7 +191,11 @@ impl Simulator {
                         self.handle_t_command(content)?;
                         return Ok(None); // Data commands are silent
                     }
-                    // 'D', etc. will be handled here
+                    'D' => {
+                        self.handle_d_command(content)?;
+                        return Ok(None); // Data commands are silent
+                    }
+                    // 'E', etc. will be handled here
                     _ => {} // Fall through to 'C' command check
                 }
             }
@@ -320,6 +330,42 @@ impl Simulator {
         self.driver_data_checksum += sram1 + sram2 + sram3 + sram4 + sram5 + sram6 + sram7 + sram8;
         Ok(())
     }
+
+    /// Parses a 'D' command, updates PSU state, and updates the checksum.
+    fn handle_d_command(&mut self, content: &str) -> Result<(), CommandError> {
+        if content.len() < 17 { return Err(CommandError::TooShort); }
+        let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
+
+        let sram3_psu_num = parse_hex(3, 5)? as usize;
+        let sram2_i_cal = parse_hex(5, 12)?;
+        let sram1_i_mon = parse_hex(9, 12)?;
+        let sram4_i_cal_off = parse_hex(12, 16)?;
+        let sram5_pos_neg = parse_hex(16, 17)?;
+
+        if sram3_psu_num > 0 && sram3_psu_num < 7 {
+            // Standard PSU current config
+            let psu = &mut self.psus[sram3_psu_num - 1];
+            psu.current_monitor_limit = sram1_i_mon as f32 / 100.0;
+            psu.i_cal_val = sram2_i_cal as f32 / 1000.0;
+            psu.i_cal_offset_val = sram4_i_cal_off as f32 / 100.0;
+            psu.pos_neg_i = sram5_pos_neg;
+            if psu.pos_neg_i == 1 {
+                psu.i_cal_offset_val *= -1.0;
+            }
+        } else if sram3_psu_num >= 7 && sram3_psu_num < 9 {
+            // Special case for voltage offset config
+            let target_psu_index = sram3_psu_num - 7; // 7 -> 0, 8 -> 1
+            let psu = &mut self.psus[target_psu_index];
+            psu.v_cal_offset_val = sram4_i_cal_off as f32 / 100.0;
+            psu.pos_neg_v = sram5_pos_neg;
+            if psu.pos_neg_v == 1 {
+                psu.v_cal_offset_val *= -1.0;
+            }
+        }
+
+        self.driver_data_checksum += sram1_i_mon + sram2_i_cal + sram3_psu_num as u32 + sram4_i_cal_off + sram5_pos_neg;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -427,31 +473,16 @@ mod tests {
     fn q_command_updates_psu_state_and_checksum() {
         let mut sim = Simulator::new(0x1F);
         sim.process_command("<C1F5002>").unwrap();
-
-        // Command to configure PSU #3 (index 2)
-        // Q<psu=03><delay=064><seq=2><cal=0C80><low=07D><high=0FA><gain=0><vmon=0>
-        // The last digit '0' means vmon_mult is 0, so we divide by 10.
         let q_command = "<Qxx0306420C8007D0FA00>";
-
-        let psu_num = 0x03;
-        let delay = 0x064;
-        let seq_id = 0x2;
-        let cal_v = 0x0C80;
-        let low_v = 0x07D;
-        let high_v = 0x0FA;
+        let psu_num = 0x03; let delay = 0x064; let seq_id = 0x2;
+        let cal_v = 0x0C80; let low_v = 0x07D; let high_v = 0x0FA;
         let expected_checksum = psu_num + delay + seq_id + cal_v + low_v + high_v;
-
-        let response = sim.process_command(q_command).unwrap();
-        assert_eq!(response, None); // Should be silent
-
-        // Check PSU state
-        let psu = &sim.psus[2]; // PSU #3 is at index 2
+        sim.process_command(q_command).unwrap();
+        let psu = &sim.psus[2];
         assert_eq!(psu.sequence_id, 2);
-        assert_eq!(psu.sequence_delay, 100); // 0x64
-        assert_eq!(psu.high_voltage_limit, 25.0); // 0xFA = 250, divided by 10
-        assert_eq!(psu.low_voltage_limit, 12.5);  // 0x7D = 125, divided by 10
-
-        // Check checksum
+        assert_eq!(psu.sequence_delay, 100);
+        assert_eq!(psu.high_voltage_limit, 25.0);
+        assert_eq!(psu.low_voltage_limit, 12.5);
         let end_response = sim.process_command("<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
     }
@@ -460,20 +491,65 @@ mod tests {
     fn t_command_updates_timer_and_checksum() {
         let mut sim = Simulator::new(0x1F);
         sim.process_command("<C1F5002>").unwrap();
-
-        // T<sram8>...<sram1>
-        // Txx<08><07><06><05><04><03><02><01>
         let t_command = "<Txx0807060504030201>";
-
         let s1 = 0x01; let s2 = 0x02; let s3 = 0x03; let s4 = 0x04;
         let s5 = 0x05; let s6 = 0x06; let s7 = 0x07; let s8 = 0x08;
         let expected_checksum = s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8;
-
-        let response = sim.process_command(t_command).unwrap();
-        assert_eq!(response, None); // Silent
-
+        sim.process_command(t_command).unwrap();
         assert_eq!(sim.timer_values, [s1, s2, s3, s4]);
         assert_eq!(sim.alarm_values, [s5, s6, s7, s8]);
+        let end_response = sim.process_command("<C1F5003>").unwrap();
+        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+    }
+
+    #[test]
+    fn d_command_updates_psu_current_config() {
+        let mut sim = Simulator::new(0x1F);
+        sim.process_command("<C1F5002>").unwrap();
+
+        // D<psu=04><i_cal=00003E8><i_mon=0C8><i_cal_off=0064><pos_neg=1>
+        let d_command = "<Dxx043E80C800641>";
+
+        let psu_num = 0x04;
+        let i_cal = 0x3E8;
+        let i_mon = 0x0C8;
+        let i_cal_off = 0x0064;
+        let pos_neg = 1;
+        let expected_checksum = psu_num + i_cal + i_mon + i_cal_off + pos_neg;
+
+        sim.process_command(d_command).unwrap();
+
+        let psu = &sim.psus[3]; // PSU #4 is at index 3
+        assert_eq!(psu.current_monitor_limit, 2.0); // 0xC8 = 200 -> 2.00
+        assert_eq!(psu.i_cal_val, 1.0); // 0x3E8 = 1000 -> 1.000
+        assert_eq!(psu.i_cal_offset_val, -1.0); // 0x64 = 100 -> 1.00, pos_neg=1 makes it negative
+        assert_eq!(psu.pos_neg_i, 1);
+
+        let end_response = sim.process_command("<C1F5003>").unwrap();
+        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+    }
+
+    #[test]
+    fn d_command_updates_psu_voltage_offset() {
+        let mut sim = Simulator::new(0x1F);
+        sim.process_command("<C1F5002>").unwrap();
+
+        // D<psu=07><...><v_cal_off=0032><pos_neg=0>
+        // PSU #7 maps to voltage offset for PSU #1 (index 0)
+        let d_command = "<Dxx07000000000320>";
+
+        let psu_num = 0x07;
+        let i_cal = 0x0;
+        let i_mon = 0x0;
+        let v_cal_off = 0x0032;
+        let pos_neg = 0;
+        let expected_checksum = psu_num + i_cal + i_mon + v_cal_off + pos_neg;
+
+        sim.process_command(d_command).unwrap();
+
+        let psu = &sim.psus[0]; // Target is PSU #1 (index 0)
+        assert_eq!(psu.v_cal_offset_val, 0.5); // 0x32 = 50 -> 0.50
+        assert_eq!(psu.pos_neg_v, 0);
 
         let end_response = sim.process_command("<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));

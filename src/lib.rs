@@ -97,6 +97,20 @@ pub struct SineWave {
     pub reset_value: u32,
 }
 
+// Represents system-wide configuration and error handling settings.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct SystemConfig {
+    pub auto_reset: bool,
+    pub auto_reset_retries: u32,
+    pub stop_on_v_error: bool,
+    pub stop_on_i_error: bool,
+    pub stop_on_clk_error: bool,
+    pub psu_sequence_enabled: bool,
+    pub stop_on_temp_error: bool,
+    pub psu_step_enabled: bool,
+    pub psu_step_delay: u32,
+}
+
 // The main struct that holds the entire state of the simulated driver board.
 #[derive(Debug, Clone)]
 pub struct Simulator {
@@ -113,6 +127,8 @@ pub struct Simulator {
     // Timer and Alarm values
     pub timer_values: [u32; 4],
     pub alarm_values: [u32; 4],
+    // System configuration
+    pub system_config: SystemConfig,
     // --- Internal state for data loading sessions ---
     sram_address: u32,
     pattern_data_checksum: u32,
@@ -132,6 +148,7 @@ impl Simulator {
             sine_waves: Default::default(),
             timer_values: [0; 4],
             alarm_values: [0; 4],
+            system_config: Default::default(),
             sram_address: 1,
             pattern_data_checksum: 0,
             driver_data_checksum: 0,
@@ -201,7 +218,10 @@ impl Simulator {
                         self.handle_s_command(content)?;
                         return Ok(None); // Data commands are silent
                     }
-                    // 'E', etc. will be handled here
+                    'E' => {
+                        self.handle_e_command(content)?;
+                        return Ok(None); // Data commands are silent
+                    }
                     _ => {} // Fall through to 'C' command check
                 }
             }
@@ -400,6 +420,35 @@ impl Simulator {
         self.driver_data_checksum += sram1_amp + sram2_offset + sram3_freq_base + sram4_duty + sram5_reset + sram6_type + sram7_used + sram8_sw_num as u32;
         Ok(())
     }
+
+    /// Parses an 'E' command, updates system config, and updates the checksum.
+    fn handle_e_command(&mut self, content: &str) -> Result<(), CommandError> {
+        if content.len() < 19 { return Err(CommandError::TooShort); }
+        let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
+
+        let sram9 = parse_hex(3, 7)?;
+        let sram8 = parse_hex(7, 9)?;
+        let sram7 = parse_hex(9, 11)?;
+        let sram6 = parse_hex(11, 13)?;
+        let sram5 = parse_hex(13, 15)?;
+        let sram4 = parse_hex(15, 16)?;
+        let sram3 = parse_hex(16, 17)?;
+        let sram2 = parse_hex(17, 18)?;
+        let sram1 = parse_hex(18, 19)?;
+
+        self.system_config.auto_reset = sram6 == 1;
+        self.system_config.auto_reset_retries = sram7;
+        self.system_config.stop_on_v_error = sram1 == 1;
+        self.system_config.stop_on_i_error = sram2 == 1;
+        self.system_config.stop_on_clk_error = sram3 == 1;
+        self.system_config.psu_sequence_enabled = sram4 == 1;
+        self.system_config.stop_on_temp_error = sram5 == 1;
+        self.system_config.psu_step_enabled = sram8 == 1;
+        self.system_config.psu_step_delay = sram9;
+
+        self.driver_data_checksum += sram1 + sram2 + sram3 + sram4 + sram5 + sram6 + sram7 + sram8 + sram9;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -591,6 +640,35 @@ mod tests {
         assert_eq!(sw.frequency_base, 0x03);
         assert_eq!(sw.duty_cycle, 0x14);
         assert_eq!(sw.reset_value, 0x0A);
+
+        let end_response = sim.process_command("<C1F5003>").unwrap();
+        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+    }
+
+    #[test]
+    fn e_command_updates_system_config() {
+        let mut sim = Simulator::new(0x1F);
+        sim.process_command("<C1F5002>").unwrap();
+
+        // Exx<delay=01F4><step_en=01><retries=05><auto_reset=01><temp_err=01><seq_en=1><clk_err=1><i_err=1><v_err=1>
+        let e_command = "<Exx01F4010501011111>";
+
+        let s1 = 1; let s2 = 1; let s3 = 1; let s4 = 1;
+        let s5 = 0x01; let s6 = 0x01; let s7 = 0x05; let s8 = 0x01; let s9 = 0x01F4;
+        let expected_checksum = s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8 + s9;
+
+        sim.process_command(e_command).unwrap();
+
+        let config = &sim.system_config;
+        assert_eq!(config.stop_on_v_error, true);
+        assert_eq!(config.stop_on_i_error, true);
+        assert_eq!(config.stop_on_clk_error, true);
+        assert_eq!(config.psu_sequence_enabled, true);
+        assert_eq!(config.stop_on_temp_error, true);
+        assert_eq!(config.auto_reset, true);
+        assert_eq!(config.auto_reset_retries, 5);
+        assert_eq!(config.psu_step_enabled, true);
+        assert_eq!(config.psu_step_delay, 500);
 
         let end_response = sim.process_command("<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));

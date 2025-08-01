@@ -497,7 +497,7 @@ impl Simulator {
         let sram8 = parse_hex(4, 5)?;
         let sram7 = parse_hex(5, 7)?;
         let sram6 = parse_hex(7, 9)?;
-        let sram5 = parse_hex(9, 10)?;
+        let _sram5 = parse_hex(9, 10)?;
         let sram4 = parse_hex(10, 12)?;
         let sram3 = parse_hex(12, 14)?;
         let sram2 = parse_hex(14, 16)?;
@@ -509,9 +509,11 @@ impl Simulator {
         self.system_config.clk64_mon_filter = !(sram3 + (sram4 << 8));
         self.system_config.clocks_required = sram9 == 1;
 
-        // The C code's checksum for 'F' is unusual. It sums the individual hex digits.
-        // We will replicate by summing the parsed values, which is the dominant pattern.
-        self.driver_data_checksum += sram1 + sram2 + sram3 + sram4 + sram5 + sram6 + sram7 + sram8 + sram9;
+        // The C code's checksum for 'F' is character-by-character.
+        let checksum_chars = &content[3..18];
+        self.driver_data_checksum += checksum_chars.chars().fold(0, |acc, c| {
+            acc + c.to_digit(16).unwrap_or(0)
+        });
         Ok(())
     }
 }
@@ -744,8 +746,8 @@ mod tests {
         let mut sim = Simulator::new(0x1F);
         sim.process_command("<C1F5002>").unwrap();
 
-        // Axx<s3=1><s2=064><s1=00C8><s4=00><s6=1><s5=000A><s7=0A>
-        let a_command = "<Axx106400C8001000A0A>";
+        // Axx<s3=1><s2=064><s1=00C8><s4=00><s6=1><s5=000A><padding=00>
+        let a_command = "<Axx106400C80001000A00>";
 
         let s1 = 0x00C8; // cal_temp
         let s2 = 0x064;  // offset
@@ -772,12 +774,10 @@ mod tests {
         let mut sim = Simulator::new(0x1F);
         sim.process_command("<C1F5002>").unwrap();
 
-        // Fxx<s9=1><s8=1><s7=00><s6=0A><s5=0><s4=FF><s3=00><s2=FF><s1=FF>
-        let f_command = "<Fxx11000A0FF00FFFF>";
+        // Fxx<s9=1><s8=1><s7=00><s6=0A><s5=0><s4=CD><s3=AB><s2=FF><s1=FF>
+        let f_command = "<Fxx11000A0CDABFFFF>";
 
-        let s1 = 0xFF; let s2 = 0xFF; let s3 = 0x00; let s4 = 0xFF;
-        let s5 = 0x0; let s6 = 0x0A; let s7 = 0x00; let s8 = 1; let s9 = 1;
-        let expected_checksum = s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8 + s9;
+        let expected_checksum = "11000A0CDABFFFF".chars().fold(0, |acc, c| acc + c.to_digit(16).unwrap());
 
         sim.process_command(f_command).unwrap();
 
@@ -786,7 +786,7 @@ mod tests {
         assert_eq!(config.clocks_restart_required, true);
         assert_eq!(config.clocks_restart_time, 600); // 10 * 60
         assert_eq!(config.clk32_mon_filter, !0xFFFF);
-        assert_eq!(config.clk64_mon_filter, !0xFF00);
+        assert_eq!(config.clk64_mon_filter, !0xCDAB);
 
         let end_response = sim.process_command("<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));

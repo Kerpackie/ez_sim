@@ -337,7 +337,7 @@ impl Simulator {
         let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
 
         let sram3_psu_num = parse_hex(3, 5)? as usize;
-        let sram2_i_cal = parse_hex(5, 12)?;
+        let sram2_i_cal = parse_hex(5, 9)?;
         let sram1_i_mon = parse_hex(9, 12)?;
         let sram4_i_cal_off = parse_hex(12, 16)?;
         let sram5_pos_neg = parse_hex(16, 17)?;
@@ -507,22 +507,22 @@ mod tests {
         let mut sim = Simulator::new(0x1F);
         sim.process_command("<C1F5002>").unwrap();
 
-        // D<psu=04><i_cal=00003E8><i_mon=0C8><i_cal_off=0064><pos_neg=1>
-        let d_command = "<Dxx043E80C800641>";
+        // D<psu=04><i_cal=3E80><i_mon=C80><i_cal_off=0641><pos_neg=1>
+        let d_command = "<Dxx043E80C8006411>";
 
         let psu_num = 0x04;
-        let i_cal = 0x3E8;
-        let i_mon = 0x0C8;
-        let i_cal_off = 0x0064;
+        let i_cal = 0x3E80;
+        let i_mon = 0xC80;
+        let i_cal_off = 0x0641;
         let pos_neg = 1;
         let expected_checksum = psu_num + i_cal + i_mon + i_cal_off + pos_neg;
 
         sim.process_command(d_command).unwrap();
 
         let psu = &sim.psus[3]; // PSU #4 is at index 3
-        assert_eq!(psu.current_monitor_limit, 2.0); // 0xC8 = 200 -> 2.00
-        assert_eq!(psu.i_cal_val, 1.0); // 0x3E8 = 1000 -> 1.000
-        assert_eq!(psu.i_cal_offset_val, -1.0); // 0x64 = 100 -> 1.00, pos_neg=1 makes it negative
+        assert_eq!(psu.current_monitor_limit, 32.0); // 0xC80 = 3200 -> 32.00
+        assert_eq!(psu.i_cal_val, 16.0); // 0x3E80 = 16000 -> 16.000
+        assert_eq!(psu.i_cal_offset_val, -16.01); // 0x641 = 1601 -> 16.01, pos_neg=1 makes it negative
         assert_eq!(psu.pos_neg_i, 1);
 
         let end_response = sim.process_command("<C1F5003>").unwrap();

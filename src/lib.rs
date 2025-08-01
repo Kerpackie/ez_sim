@@ -86,13 +86,15 @@ pub struct ClockGenerator {
 }
 
 // Represents the state of a Sine Wave generator module.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct SineWave {
     pub present: bool,
     pub enabled: bool,
-    pub frequency: u32,
-    pub amplitude: u16,
-    pub offset: u16,
+    pub amplitude: u32,
+    pub offset: u32,
+    pub frequency_base: u32,
+    pub duty_cycle: u32,
+    pub reset_value: u32,
 }
 
 // The main struct that holds the entire state of the simulated driver board.
@@ -193,6 +195,10 @@ impl Simulator {
                     }
                     'D' => {
                         self.handle_d_command(content)?;
+                        return Ok(None); // Data commands are silent
+                    }
+                    'S' => {
+                        self.handle_s_command(content)?;
                         return Ok(None); // Data commands are silent
                     }
                     // 'E', etc. will be handled here
@@ -366,6 +372,34 @@ impl Simulator {
         self.driver_data_checksum += sram1_i_mon + sram2_i_cal + sram3_psu_num as u32 + sram4_i_cal_off + sram5_pos_neg;
         Ok(())
     }
+
+    /// Parses an 'S' command, updates Sine Wave state, and updates the checksum.
+    fn handle_s_command(&mut self, content: &str) -> Result<(), CommandError> {
+        if content.len() < 19 { return Err(CommandError::TooShort); }
+        let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
+
+        let sram8_sw_num = parse_hex(3, 5)? as usize;
+        let sram7_used = parse_hex(5, 6)?;
+        let sram6_type = parse_hex(6, 7)?;
+        let sram5_reset = parse_hex(7, 9)?;
+        let sram4_duty = parse_hex(9, 11)?;
+        let sram3_freq_base = parse_hex(11, 13)?;
+        let sram2_offset = parse_hex(13, 16)?;
+        let sram1_amp = parse_hex(16, 19)?;
+
+        if sram8_sw_num > 0 && sram8_sw_num <= self.sine_waves.len() {
+            let sw = &mut self.sine_waves[sram8_sw_num - 1];
+            sw.enabled = sram7_used == 1;
+            sw.reset_value = sram5_reset;
+            sw.duty_cycle = sram4_duty;
+            sw.frequency_base = sram3_freq_base;
+            sw.offset = sram2_offset;
+            sw.amplitude = sram1_amp;
+        }
+
+        self.driver_data_checksum += sram1_amp + sram2_offset + sram3_freq_base + sram4_duty + sram5_reset + sram6_type + sram7_used + sram8_sw_num as u32;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -506,25 +540,16 @@ mod tests {
     fn d_command_updates_psu_current_config() {
         let mut sim = Simulator::new(0x1F);
         sim.process_command("<C1F5002>").unwrap();
-
-        // D<psu=04><i_cal=3E80><i_mon=C80><i_cal_off=0641><pos_neg=1>
         let d_command = "<Dxx043E80C8006411>";
-
-        let psu_num = 0x04;
-        let i_cal = 0x3E80;
-        let i_mon = 0xC80;
-        let i_cal_off = 0x0641;
-        let pos_neg = 1;
+        let psu_num = 0x04; let i_cal = 0x3E80; let i_mon = 0xC80;
+        let i_cal_off = 0x0641; let pos_neg = 1;
         let expected_checksum = psu_num + i_cal + i_mon + i_cal_off + pos_neg;
-
         sim.process_command(d_command).unwrap();
-
-        let psu = &sim.psus[3]; // PSU #4 is at index 3
-        assert_eq!(psu.current_monitor_limit, 32.0); // 0xC80 = 3200 -> 32.00
-        assert_eq!(psu.i_cal_val, 16.0); // 0x3E80 = 16000 -> 16.000
-        assert_eq!(psu.i_cal_offset_val, -16.01); // 0x641 = 1601 -> 16.01, pos_neg=1 makes it negative
+        let psu = &sim.psus[3];
+        assert_eq!(psu.current_monitor_limit, 32.0);
+        assert_eq!(psu.i_cal_val, 16.0);
+        assert_eq!(psu.i_cal_offset_val, -16.01);
         assert_eq!(psu.pos_neg_i, 1);
-
         let end_response = sim.process_command("<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
     }
@@ -533,23 +558,39 @@ mod tests {
     fn d_command_updates_psu_voltage_offset() {
         let mut sim = Simulator::new(0x1F);
         sim.process_command("<C1F5002>").unwrap();
-
-        // D<psu=07><...><v_cal_off=0032><pos_neg=0>
-        // PSU #7 maps to voltage offset for PSU #1 (index 0)
         let d_command = "<Dxx07000000000320>";
-
-        let psu_num = 0x07;
-        let i_cal = 0x0;
-        let i_mon = 0x0;
-        let v_cal_off = 0x0032;
-        let pos_neg = 0;
+        let psu_num = 0x07; let i_cal = 0x0; let i_mon = 0x0;
+        let v_cal_off = 0x0032; let pos_neg = 0;
         let expected_checksum = psu_num + i_cal + i_mon + v_cal_off + pos_neg;
-
         sim.process_command(d_command).unwrap();
-
-        let psu = &sim.psus[0]; // Target is PSU #1 (index 0)
-        assert_eq!(psu.v_cal_offset_val, 0.5); // 0x32 = 50 -> 0.50
+        let psu = &sim.psus[0];
+        assert_eq!(psu.v_cal_offset_val, 0.5);
         assert_eq!(psu.pos_neg_v, 0);
+        let end_response = sim.process_command("<C1F5003>").unwrap();
+        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+    }
+
+    #[test]
+    fn s_command_updates_sine_wave_state() {
+        let mut sim = Simulator::new(0x1F);
+        sim.process_command("<C1F5002>").unwrap();
+
+        // S<sw_num=01><used=1><type=0><reset=0A><duty=14><freq=03><offset=190><amp=258>
+        let s_command = "<Sxx01100A1403190258>";
+
+        let s1 = 0x258; let s2 = 0x190; let s3 = 0x03; let s4 = 0x14;
+        let s5 = 0x0A; let s6 = 0x0; let s7 = 1; let s8 = 1;
+        let expected_checksum = s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8;
+
+        sim.process_command(s_command).unwrap();
+
+        let sw = &sim.sine_waves[0]; // SW #1 is at index 0
+        assert_eq!(sw.enabled, true);
+        assert_eq!(sw.amplitude, 0x258);
+        assert_eq!(sw.offset, 0x190);
+        assert_eq!(sw.frequency_base, 0x03);
+        assert_eq!(sw.duty_cycle, 0x14);
+        assert_eq!(sw.reset_value, 0x0A);
 
         let end_response = sim.process_command("<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));

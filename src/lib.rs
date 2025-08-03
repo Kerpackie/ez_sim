@@ -136,6 +136,16 @@ pub struct PatternLoop {
     pub count: u32,
 }
 
+// Represents the main pattern clock configuration.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct MainClockConfig {
+    pub freq_low_byte: u32,
+    pub freq_high_byte: u32,
+    pub period_low_byte: u32,
+    pub period_high_byte: u32,
+    pub source: u32,
+}
+
 // The main struct that holds the entire state of the simulated driver board.
 #[derive(Debug, Clone)]
 pub struct Simulator {
@@ -156,6 +166,9 @@ pub struct Simulator {
     pub system_config: SystemConfig,
     // Pattern Loop configuration
     pub pattern_loops: [PatternLoop; 8],
+    // Main pattern clock configuration
+    pub main_clock_config: MainClockConfig,
+    pub loop_enables: u32,
     // --- Internal state for data loading sessions ---
     sram_address: u32,
     pattern_data_checksum: u32,
@@ -177,6 +190,8 @@ impl Simulator {
             alarm_values: [0; 4],
             system_config: Default::default(),
             pattern_loops: Default::default(),
+            main_clock_config: Default::default(),
+            loop_enables: 0,
             sram_address: 1,
             pattern_data_checksum: 0,
             driver_data_checksum: 0,
@@ -264,6 +279,10 @@ impl Simulator {
                     }
                     'L' => {
                         self.handle_l_command(content)?;
+                        return Ok(None); // Data commands are silent
+                    }
+                    'X' => {
+                        self.handle_x_command(content)?;
                         return Ok(None); // Data commands are silent
                     }
                     _ => {} // Fall through to 'C' command check
@@ -593,6 +612,29 @@ impl Simulator {
         self.driver_data_checksum += sram1_loop_num as u32 + sram2_start_addr + sram3_end_addr + sram4_count;
         Ok(())
     }
+
+    /// Parses an 'X' command, updates clock and loop config, and updates the checksum.
+    fn handle_x_command(&mut self, content: &str) -> Result<(), CommandError> {
+        if content.len() < 14 { return Err(CommandError::TooShort); }
+        let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
+
+        let sram1 = parse_hex(3, 5)?;
+        let sram2 = parse_hex(5, 7)?;
+        let sram3 = parse_hex(7, 9)?;
+        let sram4 = parse_hex(9, 11)?;
+        let sram5 = parse_hex(11, 12)?;
+        let sram6 = parse_hex(12, 14)?;
+
+        self.main_clock_config.freq_low_byte = sram1;
+        self.main_clock_config.freq_high_byte = sram2;
+        self.main_clock_config.period_low_byte = sram3;
+        self.main_clock_config.period_high_byte = sram4;
+        self.main_clock_config.source = sram5;
+        self.loop_enables = sram6;
+
+        self.driver_data_checksum += sram1 + sram2 + sram3 + sram4 + sram5 + sram6;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -917,6 +959,34 @@ mod tests {
         assert_eq!(p_loop.start_address, 0x00);
         assert_eq!(p_loop.end_address, 0xFF);
         assert_eq!(p_loop.count, 0x0A);
+
+        let end_response = sim.process_command("<C1F5003>").unwrap();
+        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+    }
+
+    #[test]
+    fn x_command_updates_clock_and_loop_config() {
+        let mut sim = Simulator::new(0x1F);
+        sim.process_command("<C1F5002>").unwrap();
+
+        // Xxx<f_low=28><f_high=00><p_low=14><p_high=00><src=0><loops=0F>
+        let x_command = "<Xxx2800140000F>";
+
+        let s1 = 0x28; // f_low
+        let s2 = 0x00; // f_high
+        let s3 = 0x14; // p_low
+        let s4 = 0x00; // p_high
+        let s5 = 0;    // source
+        let s6 = 0x0F; // loop_enables
+        let expected_checksum = s1 + s2 + s3 + s4 + s5 + s6;
+
+        sim.process_command(x_command).unwrap();
+
+        let clock = &sim.main_clock_config;
+        assert_eq!(clock.freq_low_byte, 0x28);
+        assert_eq!(clock.period_low_byte, 0x14);
+        assert_eq!(clock.source, 0);
+        assert_eq!(sim.loop_enables, 0x0F);
 
         let end_response = sim.process_command("<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));

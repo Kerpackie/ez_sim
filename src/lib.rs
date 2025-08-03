@@ -184,6 +184,11 @@ pub struct AmonTest {
     pub tp1_discharge_time: u32,
     pub tp2_discharge_time: u32,
     pub unit_type: u32,
+    // Fields for 'I' command
+    pub cal_gain: f32,
+    pub cal_offset: f32,
+    pub high_limit: f32,
+    pub low_limit: f32,
 }
 
 // Represents the configuration for a single pattern loop.
@@ -370,6 +375,7 @@ impl Simulator {
                 b'W' => { self.handle_w_command(content_bytes)?; return Ok(None); }
                 b'U' => { self.handle_u_command(content_bytes)?; return Ok(None); }
                 b'B' => { self.handle_b_command(content_bytes)?; return Ok(None); }
+                b'I' => { self.handle_i_command(content_bytes)?; return Ok(None); }
                 _ => {} // Fall through to 'C' command check
             }
         }
@@ -643,6 +649,48 @@ impl Simulator {
         }
 
         self.driver_data_checksum += sram1 + sram2 + sram3 + sram4 + sram5 + test_num as u32 + cmd_type;
+        Ok(())
+    }
+
+    /// Parses an 'I' command, updates AMON calibration and limits, and updates the checksum.
+    fn handle_i_command(&mut self, content_bytes: &[u8]) -> Result<(), CommandError> {
+        let content = std::str::from_utf8(content_bytes).map_err(|_| CommandError::InvalidParameter)?;
+        if content.len() < 21 { return Err(CommandError::TooShort); }
+        let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
+
+        let cmd_type = parse_hex(3, 4)?;
+        let test_num = parse_hex(4, 6)? as usize;
+
+        if test_num == 0 || test_num > self.amon_tests.len() {
+            return Err(CommandError::InvalidParameter);
+        }
+        let test = &mut self.amon_tests[test_num - 1];
+
+        // The C code constructs the float from multiple hex string segments.
+        // It's parsing an 8-character hex string representing a u32.
+        let float_as_u32 = parse_hex(13, 21)?;
+        let float_val = f32::from_bits(float_as_u32);
+
+        match cmd_type {
+            1 => test.tp1_gain = float_val,
+            2 => test.tp2_gain = float_val,
+            3 => test.sum_gain = float_val,
+            4 => test.cal_gain = float_val,
+            5 => test.cal_offset = float_val,
+            6 => test.high_limit = float_val,
+            7 => test.low_limit = float_val,
+            _ => return Err(CommandError::InvalidParameter),
+        }
+
+        // The checksum logic in C is complex for this command.
+        // DRIVER_DATA_CHECK=DRIVER_DATA_CHECK + nTest_Number + CMD_Type + toint(szCommand[13]) + toint(szCommand[14]) + ...
+        // It sums the integer value of each hex character.
+        let mut checksum_update = test_num as u32 + cmd_type;
+        for i in 13..21 {
+            checksum_update += u32::from_str_radix(&content[i..i + 1], 16).unwrap_or(0);
+        }
+        self.driver_data_checksum += checksum_update;
+
         Ok(())
     }
 
@@ -1887,6 +1935,42 @@ mod tests {
             (0x02 + 0x02 + 0x14 + 0x32 + 0x1E + 0x64 + 0x05) +
             (0x03 + 0x03 + 0x01 + 0x02 + 0x03 + 0x04 + 0x0F) +
             (0x04 + 0x04 + 0x19 + 0x64 + 0x21 + 0xC8 + 0x0A);
+        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+    }
+
+    #[test]
+    fn i_command_updates_amon_cal_and_limits() {
+        let mut sim = Simulator::new(0x1F);
+        sim.process_command(b"<C1F5002>").unwrap(); // Start driver loading
+
+        // Type 4: cal_gain = 1.25 (0x3FA00000)
+        let i_command4 = b"<Ixx40100000003FA00000>";
+        sim.process_command(i_command4).unwrap();
+        assert_eq!(sim.amon_tests[0].cal_gain, 1.25);
+
+        // Type 5: cal_offset = -0.5 (0xBF000000)
+        let i_command5 = b"<Ixx5010000000BF000000>";
+        sim.process_command(i_command5).unwrap();
+        assert_eq!(sim.amon_tests[0].cal_offset, -0.5);
+
+        // Type 6: high_limit = 100.0 (0x42C80000)
+        let i_command6 = b"<Ixx602000000042C80000>";
+        sim.process_command(i_command6).unwrap();
+        assert_eq!(sim.amon_tests[1].high_limit, 100.0);
+
+        // Type 7: low_limit = 0.1 (0x3DCCCCCD)
+        let i_command7 = b"<Ixx70200000003DCCCCCD>";
+        sim.process_command(i_command7).unwrap();
+        assert_eq!(sim.amon_tests[1].low_limit, 0.1);
+
+        let end_response = sim.process_command(b"<C1F5003>").unwrap();
+
+        let checksum1 = 4 + 1 + (0x3+0xF+0xA+0+0+0+0+0);
+        let checksum2 = 5 + 1 + (0xB+0xF+0+0+0+0+0+0);
+        let checksum3 = 6 + 2 + (0x4+0x2+0xC+0x8+0+0+0+0);
+        let checksum4 = 7 + 2 + (0x3+0xD+0xC+0xC+0xC+0xC+0xC+0xD);
+        let expected_checksum = checksum1 + checksum2 + checksum3 + checksum4;
+
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
     }
 }

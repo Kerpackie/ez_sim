@@ -167,6 +167,9 @@ pub struct AmonTest {
     pub tp2_amon_mux_a: u32,
     pub tp2_amon_mux_b: u32,
     pub psu_link: u32,
+    pub tp1_gain: f32,
+    pub tp2_gain: f32,
+    pub sum_gain: f32,
 }
 
 // Represents the configuration for a single pattern loop.
@@ -220,6 +223,7 @@ pub struct Simulator {
     pub ptc_config: PtcConfig,
     // AMON/DUTMON test configurations
     pub amon_tests: Vec<AmonTest>,
+    pub amon_test_count: u32,
     // Micro-stepping global enable flag
     pub ustep_enabled: bool,
     // Pattern Loop configuration
@@ -255,6 +259,7 @@ impl Simulator {
             system_config: Default::default(),
             ptc_config: Default::default(),
             amon_tests: vec![AmonTest::default(); 100], // Pre-allocate for 100 tests
+            amon_test_count: 0,
             ustep_enabled: false,
             pattern_loops: Default::default(),
             main_clock_config: Default::default(),
@@ -349,6 +354,7 @@ impl Simulator {
                 b'M' => { self.handle_m_command(content_bytes)?; return Ok(None); }
                 b'Z' => { self.handle_z_command(content_bytes)?; return Ok(None); }
                 b'W' => { self.handle_w_command(content_bytes)?; return Ok(None); }
+                b'U' => { self.handle_u_command(content_bytes)?; return Ok(None); }
                 _ => {} // Fall through to 'C' command check
             }
         }
@@ -540,6 +546,31 @@ impl Simulator {
         }
 
         self.driver_data_checksum += sram1_tp2_amon_b + sram2_tp2_amon_a + sram3_tp2_mux + sram4_tp1_amon_b + sram5_tp1_amon_a + sram6_tp1_mux + sram7_type + sram8_test_num as u32 + sram9_psu_link;
+        Ok(())
+    }
+
+    /// Parses a 'U' command, updates AMON gain config, and updates the checksum.
+    fn handle_u_command(&mut self, content_bytes: &[u8]) -> Result<(), CommandError> {
+        let content = std::str::from_utf8(content_bytes).map_err(|_| CommandError::InvalidParameter)?;
+        if content.len() < 19 { return Err(CommandError::TooShort); }
+        let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
+
+        let sram8_test_num = parse_hex(3, 5)? as usize;
+        let sram4_test_count = parse_hex(17, 19)?;
+        let sram3_sum_gain = parse_hex(13, 17)?;
+        let sram2_tp2_gain = parse_hex(9, 13)?;
+        let sram1_tp1_gain = parse_hex(5, 9)?;
+
+        self.amon_test_count = sram4_test_count;
+
+        if sram8_test_num > 0 && sram8_test_num <= self.amon_tests.len() {
+            let test = &mut self.amon_tests[sram8_test_num - 1];
+            test.tp1_gain = sram1_tp1_gain as f32 / 1000.0;
+            test.tp2_gain = sram2_tp2_gain as f32 / 1000.0;
+            test.sum_gain = sram3_sum_gain as f32 / 1000.0;
+        }
+
+        self.driver_data_checksum += sram1_tp1_gain + sram2_tp2_gain + sram3_sum_gain + sram4_test_count + sram8_test_num as u32;
         Ok(())
     }
 
@@ -1702,6 +1733,33 @@ mod tests {
         assert_eq!(test.tp2_amon_mux_a, s2);
         assert_eq!(test.tp2_amon_mux_b, s1);
         assert_eq!(test.psu_link, s9);
+
+        let end_response = sim.process_command(b"<C1F5003>").unwrap();
+        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+    }
+
+    #[test]
+    fn u_command_updates_amon_gain_config() {
+        let mut sim = Simulator::new(0x1F);
+        sim.process_command(b"<C1F5002>").unwrap(); // Start driver loading
+
+        // Uxx<test=01><tp1_gain=03E8><tp2_gain=07D0><sum_gain=0BB8><count=0A>
+        let u_command = b"<Uxx0103E807D00BB80A>";
+
+        let s8 = 0x01;   // test_num
+        let s1 = 0x03E8; // tp1_gain (1000 -> 1.0)
+        let s2 = 0x07D0; // tp2_gain (2000 -> 2.0)
+        let s3 = 0x0BB8; // sum_gain (3000 -> 3.0)
+        let s4 = 0x0A;   // test_count
+        let expected_checksum = s1 + s2 + s3 + s4 + s8;
+
+        sim.process_command(u_command).unwrap();
+
+        assert_eq!(sim.amon_test_count, 10);
+        let test = &sim.amon_tests[0]; // Test #1 is at index 0
+        assert_eq!(test.tp1_gain, 1.0);
+        assert_eq!(test.tp2_gain, 2.0);
+        assert_eq!(test.sum_gain, 3.0);
 
         let end_response = sim.process_command(b"<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));

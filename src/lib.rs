@@ -69,13 +69,26 @@ pub struct Psu {
 }
 
 // Represents the state of an FPGA, including its pattern memory.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct Fpga {
     pub present: bool,
-    // Using a Vec<u8> to represent pattern memory.
-    // This can be adapted to a more complex structure if needed.
-    pub pattern_memory: Vec<u8>,
+    // Using a Vec<u32> to represent pattern memory words.
+    pub pattern_memory_a: Vec<u32>,
+    pub pattern_memory_b: Vec<u32>,
 }
+
+impl Default for Fpga {
+    fn default() -> Self {
+        Self {
+            present: false,
+            // Pre-allocate memory to avoid resizing during data loading.
+            // 0x100000 corresponds to 1M addresses.
+            pattern_memory_a: vec![0; 0x100000],
+            pattern_memory_b: vec![0; 0x100000],
+        }
+    }
+}
+
 
 // Represents the state of a Clock Generator module.
 #[derive(Debug, Default, Clone)]
@@ -222,6 +235,7 @@ impl Simulator {
     }
 
     /// Parses the content of a command string into a `Command` enum.
+    /// This is only used for 'C' commands which are known to be ASCII.
     fn parse_command(&self, content: &str) -> Result<Command, CommandError> {
         let cmd_id_str = &content[3..5];
         let cmd_id = u8::from_str_radix(cmd_id_str, 10).map_err(CommandError::InvalidCommandId)?;
@@ -248,95 +262,58 @@ impl Simulator {
         }
     }
 
-    /// Processes a command string and returns the appropriate response.
-    pub fn process_command(&mut self, command_str: &str) -> Result<Option<String>, CommandError> {
-        let start_byte = command_str.find('<');
-        let end_byte = command_str.find('>');
+    /// Processes a command byte slice and returns the appropriate response.
+    pub fn process_command(&mut self, command_bytes: &[u8]) -> Result<Option<String>, CommandError> {
+        let start_byte = command_bytes.iter().position(|&b| b == b'<');
+        let end_byte = command_bytes.iter().rposition(|&b| b == b'>');
 
-        let content = match (start_byte, end_byte) {
-            (Some(start), Some(end)) if end > start => &command_str[start + 1..end],
+        let content_bytes = match (start_byte, end_byte) {
+            (Some(start), Some(end)) if end > start => &command_bytes[start + 1..end],
             _ => return Err(CommandError::InvalidFrame),
         };
 
-        // Handle data loading commands first if a session is active.
-        if self.is_driver_data_loading {
-            if let Some(cmd_char) = content.chars().next() {
-                match cmd_char {
-                    'V' => {
-                        self.handle_v_command(content)?;
-                        return Ok(None); // Data commands are silent
-                    }
-                    'Q' => {
-                        self.handle_q_command(content)?;
-                        return Ok(None); // Data commands are silent
-                    }
-                    'T' => {
-                        self.handle_t_command(content)?;
-                        return Ok(None); // Data commands are silent
-                    }
-                    'D' => {
-                        self.handle_d_command(content)?;
-                        return Ok(None); // Data commands are silent
-                    }
-                    'S' => {
-                        self.handle_s_command(content)?;
-                        return Ok(None); // Data commands are silent
-                    }
-                    'E' => {
-                        self.handle_e_command(content)?;
-                        return Ok(None); // Data commands are silent
-                    }
-                    'A' => {
-                        self.handle_a_command(content)?;
-                        return Ok(None); // Data commands are silent
-                    }
-                    'F' => {
-                        self.handle_f_command(content)?;
-                        return Ok(None); // Data commands are silent
-                    }
-                    'J' => {
-                        self.handle_j_command(content)?;
-                        return Ok(None); // Data commands are silent
-                    }
-                    'L' => {
-                        self.handle_l_command(content)?;
-                        return Ok(None); // Data commands are silent
-                    }
-                    'X' => {
-                        self.handle_x_command(content)?;
-                        return Ok(None); // Data commands are silent
-                    }
-                    'N' => {
-                        self.handle_n_command(content)?;
-                        return Ok(None); // Data commands are silent
-                    }
-                    'G' => {
-                        self.handle_g_command(content)?;
-                        return Ok(None); // Data commands are silent
-                    }
-                    'H' => {
-                        self.handle_h_command(content)?;
-                        return Ok(None); // Data commands are silent
-                    }
-                    'K' => {
-                        self.handle_k_command(content)?;
-                        return Ok(None); // Data commands are silent
-                    }
-                    'O' => {
-                        self.handle_o_command(content)?;
-                        return Ok(None); // Data commands are silent
-                    }
-                    _ => {} // Fall through to 'C' command check
-                }
-            }
-        }
-
-        if content.len() < 5 {
+        if content_bytes.is_empty() {
             return Err(CommandError::TooShort);
         }
 
+        // Handle data loading commands first if a session is active.
+        if self.is_pattern_data_loading {
+            if content_bytes[0] == b'P' {
+                self.handle_p_command(content_bytes)?;
+                return Ok(None);
+            }
+        }
+
+        if self.is_driver_data_loading {
+            match content_bytes[0] {
+                b'V' => { self.handle_v_command(content_bytes)?; return Ok(None); }
+                b'Q' => { self.handle_q_command(content_bytes)?; return Ok(None); }
+                b'T' => { self.handle_t_command(content_bytes)?; return Ok(None); }
+                b'D' => { self.handle_d_command(content_bytes)?; return Ok(None); }
+                b'S' => { self.handle_s_command(content_bytes)?; return Ok(None); }
+                b'E' => { self.handle_e_command(content_bytes)?; return Ok(None); }
+                b'A' => { self.handle_a_command(content_bytes)?; return Ok(None); }
+                b'F' => { self.handle_f_command(content_bytes)?; return Ok(None); }
+                b'J' => { self.handle_j_command(content_bytes)?; return Ok(None); }
+                b'L' => { self.handle_l_command(content_bytes)?; return Ok(None); }
+                b'X' => { self.handle_x_command(content_bytes)?; return Ok(None); }
+                b'N' => { self.handle_n_command(content_bytes)?; return Ok(None); }
+                b'G' => { self.handle_g_command(content_bytes)?; return Ok(None); }
+                b'H' => { self.handle_h_command(content_bytes)?; return Ok(None); }
+                b'K' => { self.handle_k_command(content_bytes)?; return Ok(None); }
+                b'O' => { self.handle_o_command(content_bytes)?; return Ok(None); }
+                _ => {} // Fall through to 'C' command check
+            }
+        }
+
         // Handle 'C' type control commands
-        if &content[0..1] == "C" {
+        if content_bytes[0] == b'C' {
+            // Control commands are always ASCII, so we can convert to &str for parsing.
+            let content = std::str::from_utf8(content_bytes).map_err(|_| CommandError::InvalidParameter)?;
+            if content.len() < 5 {
+                return Err(CommandError::TooShort);
+            }
+
             let addr_str = &content[1..3];
             let address = u8::from_str_radix(addr_str, 16).map_err(CommandError::InvalidAddress)?;
 
@@ -391,7 +368,8 @@ impl Simulator {
     }
 
     /// Parses a 'V' command and updates the driver data checksum.
-    fn handle_v_command(&mut self, content: &str) -> Result<(), CommandError> {
+    fn handle_v_command(&mut self, content_bytes: &[u8]) -> Result<(), CommandError> {
+        let content = std::str::from_utf8(content_bytes).map_err(|_| CommandError::InvalidParameter)?;
         if content.len() < 19 { return Err(CommandError::TooShort); }
         let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
 
@@ -407,7 +385,8 @@ impl Simulator {
     }
 
     /// Parses a 'Q' command, updates PSU state, and updates the checksum.
-    fn handle_q_command(&mut self, content: &str) -> Result<(), CommandError> {
+    fn handle_q_command(&mut self, content_bytes: &[u8]) -> Result<(), CommandError> {
+        let content = std::str::from_utf8(content_bytes).map_err(|_| CommandError::InvalidParameter)?;
         if content.len() < 21 { return Err(CommandError::TooShort); }
         let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
 
@@ -435,7 +414,8 @@ impl Simulator {
     }
 
     /// Parses a 'T' command, updates timer state, and updates the checksum.
-    fn handle_t_command(&mut self, content: &str) -> Result<(), CommandError> {
+    fn handle_t_command(&mut self, content_bytes: &[u8]) -> Result<(), CommandError> {
+        let content = std::str::from_utf8(content_bytes).map_err(|_| CommandError::InvalidParameter)?;
         if content.len() < 19 { return Err(CommandError::TooShort); }
         let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
 
@@ -462,7 +442,8 @@ impl Simulator {
     }
 
     /// Parses a 'D' command, updates PSU state, and updates the checksum.
-    fn handle_d_command(&mut self, content: &str) -> Result<(), CommandError> {
+    fn handle_d_command(&mut self, content_bytes: &[u8]) -> Result<(), CommandError> {
+        let content = std::str::from_utf8(content_bytes).map_err(|_| CommandError::InvalidParameter)?;
         if content.len() < 17 { return Err(CommandError::TooShort); }
         let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
 
@@ -498,7 +479,8 @@ impl Simulator {
     }
 
     /// Parses an 'S' command, updates Sine Wave state, and updates the checksum.
-    fn handle_s_command(&mut self, content: &str) -> Result<(), CommandError> {
+    fn handle_s_command(&mut self, content_bytes: &[u8]) -> Result<(), CommandError> {
+        let content = std::str::from_utf8(content_bytes).map_err(|_| CommandError::InvalidParameter)?;
         if content.len() < 19 { return Err(CommandError::TooShort); }
         let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
 
@@ -526,7 +508,8 @@ impl Simulator {
     }
 
     /// Parses an 'E' command, updates system config, and updates the checksum.
-    fn handle_e_command(&mut self, content: &str) -> Result<(), CommandError> {
+    fn handle_e_command(&mut self, content_bytes: &[u8]) -> Result<(), CommandError> {
+        let content = std::str::from_utf8(content_bytes).map_err(|_| CommandError::InvalidParameter)?;
         if content.len() < 19 { return Err(CommandError::TooShort); }
         let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
 
@@ -555,7 +538,8 @@ impl Simulator {
     }
 
     /// Parses an 'A' command, updates system config, and updates the checksum.
-    fn handle_a_command(&mut self, content: &str) -> Result<(), CommandError> {
+    fn handle_a_command(&mut self, content_bytes: &[u8]) -> Result<(), CommandError> {
+        let content = std::str::from_utf8(content_bytes).map_err(|_| CommandError::InvalidParameter)?;
         if content.len() < 19 { return Err(CommandError::TooShort); }
         let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
 
@@ -577,7 +561,8 @@ impl Simulator {
     }
 
     /// Parses an 'F' command, updates clock config, and updates the checksum.
-    fn handle_f_command(&mut self, content: &str) -> Result<(), CommandError> {
+    fn handle_f_command(&mut self, content_bytes: &[u8]) -> Result<(), CommandError> {
+        let content = std::str::from_utf8(content_bytes).map_err(|_| CommandError::InvalidParameter)?;
         if content.len() < 18 { return Err(CommandError::TooShort); }
         let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
 
@@ -606,7 +591,8 @@ impl Simulator {
     }
 
     /// Parses a 'J' command, updates sequence delays, and updates the checksum.
-    fn handle_j_command(&mut self, content: &str) -> Result<(), CommandError> {
+    fn handle_j_command(&mut self, content_bytes: &[u8]) -> Result<(), CommandError> {
+        let content = std::str::from_utf8(content_bytes).map_err(|_| CommandError::InvalidParameter)?;
         if content.len() < 17 { return Err(CommandError::TooShort); }
         let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
 
@@ -633,7 +619,8 @@ impl Simulator {
     }
 
     /// Parses an 'L' command, updates pattern loop state, and updates the checksum.
-    fn handle_l_command(&mut self, content: &str) -> Result<(), CommandError> {
+    fn handle_l_command(&mut self, content_bytes: &[u8]) -> Result<(), CommandError> {
+        let content = std::str::from_utf8(content_bytes).map_err(|_| CommandError::InvalidParameter)?;
         if content.len() < 11 { return Err(CommandError::TooShort); }
         let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
 
@@ -655,7 +642,8 @@ impl Simulator {
     }
 
     /// Parses an 'X' command, updates clock and loop config, and updates the checksum.
-    fn handle_x_command(&mut self, content: &str) -> Result<(), CommandError> {
+    fn handle_x_command(&mut self, content_bytes: &[u8]) -> Result<(), CommandError> {
+        let content = std::str::from_utf8(content_bytes).map_err(|_| CommandError::InvalidParameter)?;
         if content.len() < 14 { return Err(CommandError::TooShort); }
         let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
 
@@ -678,7 +666,8 @@ impl Simulator {
     }
 
     /// Parses an 'N' command, updates loop repeat counts, and updates the checksum.
-    fn handle_n_command(&mut self, content: &str) -> Result<(), CommandError> {
+    fn handle_n_command(&mut self, content_bytes: &[u8]) -> Result<(), CommandError> {
+        let content = std::str::from_utf8(content_bytes).map_err(|_| CommandError::InvalidParameter)?;
         if content.len() < 19 { return Err(CommandError::TooShort); }
         let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
 
@@ -700,7 +689,8 @@ impl Simulator {
     }
 
     /// Parses a 'G' command, updates FRC frequencies, and updates the checksum.
-    fn handle_g_command(&mut self, content: &str) -> Result<(), CommandError> {
+    fn handle_g_command(&mut self, content_bytes: &[u8]) -> Result<(), CommandError> {
+        let content = std::str::from_utf8(content_bytes).map_err(|_| CommandError::InvalidParameter)?;
         if content.len() < 19 { return Err(CommandError::TooShort); }
         let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
 
@@ -721,7 +711,8 @@ impl Simulator {
     }
 
     /// Parses an 'H' command, updates FRC periods, and updates the checksum.
-    fn handle_h_command(&mut self, content: &str) -> Result<(), CommandError> {
+    fn handle_h_command(&mut self, content_bytes: &[u8]) -> Result<(), CommandError> {
+        let content = std::str::from_utf8(content_bytes).map_err(|_| CommandError::InvalidParameter)?;
         if content.len() < 19 { return Err(CommandError::TooShort); }
         let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
 
@@ -742,7 +733,8 @@ impl Simulator {
     }
 
     /// Parses a 'K' command, updates FRC sources, and updates the checksum.
-    fn handle_k_command(&mut self, content: &str) -> Result<(), CommandError> {
+    fn handle_k_command(&mut self, content_bytes: &[u8]) -> Result<(), CommandError> {
+        let content = std::str::from_utf8(content_bytes).map_err(|_| CommandError::InvalidParameter)?;
         if content.len() < 11 { return Err(CommandError::TooShort); }
         let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
 
@@ -763,7 +755,8 @@ impl Simulator {
     }
 
     /// Parses an 'O' command, updates output routing, and updates the checksum.
-    fn handle_o_command(&mut self, content: &str) -> Result<(), CommandError> {
+    fn handle_o_command(&mut self, content_bytes: &[u8]) -> Result<(), CommandError> {
+        let content = std::str::from_utf8(content_bytes).map_err(|_| CommandError::InvalidParameter)?;
         if content.len() < 13 { return Err(CommandError::TooShort); }
         let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
 
@@ -779,6 +772,57 @@ impl Simulator {
         }
 
         self.driver_data_checksum += sram1_group as u32 + sram2 + sram3 + sram4 + sram5;
+        Ok(())
+    }
+
+    /// Parses a 'P' command, updates FPGA memory, and updates the checksum.
+    fn handle_p_command(&mut self, content_bytes: &[u8]) -> Result<(), CommandError> {
+        let bytes = content_bytes;
+        let mut checksum_update: u32 = 0;
+
+        if self.fpgas[1].present { // Two FPGAs
+            if bytes.len() < 19 { return Err(CommandError::TooShort); }
+            let sram1 = u32::from_le_bytes(bytes[1..5].try_into().unwrap());
+            let sram2 = u32::from_le_bytes(bytes[5..9].try_into().unwrap());
+            let sram3 = bytes[9] as u32;
+            let sram4 = u32::from_le_bytes(bytes[10..14].try_into().unwrap());
+            let sram5 = u32::from_le_bytes(bytes[14..18].try_into().unwrap());
+            let sram6 = bytes[18] as u32;
+
+            self.fpgas[0].pattern_memory_a[self.sram_address as usize] = sram1;
+            self.fpgas[1].pattern_memory_a[self.sram_address as usize] = sram2;
+            self.sram_address += 1;
+            self.fpgas[0].pattern_memory_a[self.sram_address as usize] = sram4;
+            self.fpgas[1].pattern_memory_a[self.sram_address as usize] = sram5;
+            self.sram_address += 1;
+
+            checksum_update += sram3 + sram6;
+            for &byte in &bytes[1..9] { checksum_update += byte as u32; }
+            for &byte in &bytes[10..18] { checksum_update += byte as u32; }
+        } else { // One FPGA
+            if bytes.len() < 21 { return Err(CommandError::TooShort); }
+            let sram1 = u32::from_le_bytes(bytes[1..5].try_into().unwrap());
+            let sram2 = bytes[5] as u32;
+            let sram3 = u32::from_le_bytes(bytes[6..10].try_into().unwrap());
+            let sram4 = bytes[10] as u32;
+            let sram5 = u32::from_le_bytes(bytes[11..15].try_into().unwrap());
+            let sram6 = bytes[15] as u32;
+            let sram7 = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
+            let sram8 = bytes[20] as u32;
+
+            self.fpgas[0].pattern_memory_a[self.sram_address as usize] = sram1; self.sram_address += 1;
+            self.fpgas[0].pattern_memory_a[self.sram_address as usize] = sram3; self.sram_address += 1;
+            self.fpgas[0].pattern_memory_a[self.sram_address as usize] = sram5; self.sram_address += 1;
+            self.fpgas[0].pattern_memory_a[self.sram_address as usize] = sram7; self.sram_address += 1;
+
+            checksum_update += sram2 + sram4 + sram6 + sram8;
+            for &byte in &bytes[1..5] { checksum_update += byte as u32; }
+            for &byte in &bytes[6..10] { checksum_update += byte as u32; }
+            for &byte in &bytes[11..15] { checksum_update += byte as u32; }
+            for &byte in &bytes[16..20] { checksum_update += byte as u32; }
+        }
+
+        self.pattern_data_checksum += checksum_update;
         Ok(())
     }
 }
@@ -798,49 +842,49 @@ mod tests {
     #[test]
     fn process_valid_command() {
         let mut sim = Simulator::new(0x1F);
-        let response = sim.process_command("<C1F03>").unwrap();
+        let response = sim.process_command(b"<C1F03>").unwrap();
         assert_eq!(response, Some(String::from("#ON#")));
     }
 
     #[test]
     fn process_command_with_trailing_characters() {
         let mut sim = Simulator::new(0x1F);
-        let response = sim.process_command("<C1F03>>>garbage").unwrap();
+        let response = sim.process_command(b"<C1F03>>>garbage").unwrap();
         assert_eq!(response, Some(String::from("#ON#")));
     }
 
     #[test]
     fn process_command_with_leading_characters() {
         let mut sim = Simulator::new(0x1F);
-        let response = sim.process_command("noise<C1F03>").unwrap();
+        let response = sim.process_command(b"noise<C1F03>").unwrap();
         assert_eq!(response, Some(String::from("#ON#")));
     }
 
     #[test]
     fn ignore_command_for_other_address() {
         let mut sim = Simulator::new(0x1F);
-        let response = sim.process_command("<C2A03>").unwrap();
+        let response = sim.process_command(b"<C2A03>").unwrap();
         assert_eq!(response, None);
     }
 
     #[test]
     fn reject_malformed_frame() {
         let mut sim = Simulator::new(0x1F);
-        assert_eq!(sim.process_command("C1F03>").unwrap_err(), CommandError::InvalidFrame);
-        assert_eq!(sim.process_command("<C1F03").unwrap_err(), CommandError::InvalidFrame);
-        assert_eq!(sim.process_command(">C1F03<").unwrap_err(), CommandError::InvalidFrame);
+        assert_eq!(sim.process_command(b"C1F03>").unwrap_err(), CommandError::InvalidFrame);
+        assert_eq!(sim.process_command(b"<C1F03").unwrap_err(), CommandError::InvalidFrame);
+        assert_eq!(sim.process_command(b">C1F03<").unwrap_err(), CommandError::InvalidFrame);
     }
 
     #[test]
     fn reject_too_short_command() {
         let mut sim = Simulator::new(0x1F);
-        assert_eq!(sim.process_command("<C1F>").unwrap_err(), CommandError::TooShort);
+        assert_eq!(sim.process_command(b"<C1F>").unwrap_err(), CommandError::TooShort);
     }
 
     #[test]
     fn reject_invalid_hex_address() {
         let mut sim = Simulator::new(0x1F);
-        let result = sim.process_command("<CZZ03>");
+        let result = sim.process_command(b"<CZZ03>");
         assert!(matches!(result, Err(CommandError::InvalidAddress(_))));
     }
 
@@ -849,48 +893,52 @@ mod tests {
     #[test]
     fn process_command_50_pattern_load_cycle() {
         let mut sim = Simulator::new(0x1F);
-        let response1 = sim.process_command("<C1F5000>").unwrap();
+        let response1 = sim.process_command(b"<C1F5000>").unwrap();
         assert_eq!(response1, Some(String::from("#OK#")));
-        let response2 = sim.process_command("<C1F5001>").unwrap();
+        let response2 = sim.process_command(b"<C1F5001>").unwrap();
         assert_eq!(response2, Some(String::from("#0,1,#")));
     }
 
     #[test]
     fn process_command_50_driver_load_cycle() {
         let mut sim = Simulator::new(0x1F);
-        let response1 = sim.process_command("<C1F5002>").unwrap();
+        let response1 = sim.process_command(b"<C1F5002>").unwrap();
         assert_eq!(response1, Some(String::from("#OK#")));
-        let response2 = sim.process_command("<C1F5003>").unwrap();
+        let response2 = sim.process_command(b"<C1F5003>").unwrap();
         assert_eq!(response2, Some(String::from("#0#")));
     }
 
     #[test]
     fn process_sequence_on_off_commands() {
         let mut sim = Simulator::new(0x1F);
-        let response_on = sim.process_command("<C1F03>").unwrap();
+        let response_on = sim.process_command(b"<C1F03>").unwrap();
         assert_eq!(response_on, Some(String::from("#ON#")));
-        let response_off = sim.process_command("<C1F04>").unwrap();
+        let response_off = sim.process_command(b"<C1F04>").unwrap();
         assert_eq!(response_off, Some(String::from("#OFF#")));
     }
 
     #[test]
     fn checksum_validation_during_driver_load() {
         let mut sim = Simulator::new(0x1F);
-        sim.process_command("<C1F5002>").unwrap();
-        let v_command = "<Vxx0605004003002001>";
+        sim.process_command(b"<C1F5002>").unwrap();
+        let v_command = b"<Vxx0605004003002001>";
         let expected_checksum = 0x06 + 0x05 + 0x004 + 0x003 + 0x002 + 0x001;
         sim.process_command(v_command).unwrap();
-        let end_response = sim.process_command("<C1F5003>").unwrap();
+        let end_response = sim.process_command(b"<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
     fn q_command_updates_psu_state_and_checksum() {
         let mut sim = Simulator::new(0x1F);
-        sim.process_command("<C1F5002>").unwrap();
-        let q_command = "<Qxx0306420C8007D0FA00>";
-        let psu_num = 0x03; let delay = 0x064; let seq_id = 0x2;
-        let cal_v = 0x0C80; let low_v = 0x07D; let high_v = 0x0FA;
+        sim.process_command(b"<C1F5002>").unwrap();
+        let q_command = b"<Qxx0306420C8007D0FA00>";
+        let psu_num = 0x03;
+        let delay = 0x064;
+        let seq_id = 0x2;
+        let cal_v = 0x0C80;
+        let low_v = 0x07D;
+        let high_v = 0x0FA;
         let expected_checksum = psu_num + delay + seq_id + cal_v + low_v + high_v;
         sim.process_command(q_command).unwrap();
         let psu = &sim.psus[2];
@@ -898,32 +946,41 @@ mod tests {
         assert_eq!(psu.sequence_delay, 100);
         assert_eq!(psu.high_voltage_limit, 25.0);
         assert_eq!(psu.low_voltage_limit, 12.5);
-        let end_response = sim.process_command("<C1F5003>").unwrap();
+        let end_response = sim.process_command(b"<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
     fn t_command_updates_timer_and_checksum() {
         let mut sim = Simulator::new(0x1F);
-        sim.process_command("<C1F5002>").unwrap();
-        let t_command = "<Txx0807060504030201>";
-        let s1 = 0x01; let s2 = 0x02; let s3 = 0x03; let s4 = 0x04;
-        let s5 = 0x05; let s6 = 0x06; let s7 = 0x07; let s8 = 0x08;
+        sim.process_command(b"<C1F5002>").unwrap();
+        let t_command = b"<Txx0807060504030201>";
+        let s1 = 0x01;
+        let s2 = 0x02;
+        let s3 = 0x03;
+        let s4 = 0x04;
+        let s5 = 0x05;
+        let s6 = 0x06;
+        let s7 = 0x07;
+        let s8 = 0x08;
         let expected_checksum = s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8;
         sim.process_command(t_command).unwrap();
         assert_eq!(sim.timer_values, [s1, s2, s3, s4]);
         assert_eq!(sim.alarm_values, [s5, s6, s7, s8]);
-        let end_response = sim.process_command("<C1F5003>").unwrap();
+        let end_response = sim.process_command(b"<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
     fn d_command_updates_psu_current_config() {
         let mut sim = Simulator::new(0x1F);
-        sim.process_command("<C1F5002>").unwrap();
-        let d_command = "<Dxx043E80C8006411>";
-        let psu_num = 0x04; let i_cal = 0x3E80; let i_mon = 0xC80;
-        let i_cal_off = 0x0641; let pos_neg = 1;
+        sim.process_command(b"<C1F5002>").unwrap();
+        let d_command = b"<Dxx043E80C8006411>";
+        let psu_num = 0x04;
+        let i_cal = 0x3E80;
+        let i_mon = 0xC80;
+        let i_cal_off = 0x0641;
+        let pos_neg = 1;
         let expected_checksum = psu_num + i_cal + i_mon + i_cal_off + pos_neg;
         sim.process_command(d_command).unwrap();
         let psu = &sim.psus[3];
@@ -931,36 +988,45 @@ mod tests {
         assert_eq!(psu.i_cal_val, 16.0);
         assert_eq!(psu.i_cal_offset_val, -16.01);
         assert_eq!(psu.pos_neg_i, 1);
-        let end_response = sim.process_command("<C1F5003>").unwrap();
+        let end_response = sim.process_command(b"<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
     fn d_command_updates_psu_voltage_offset() {
         let mut sim = Simulator::new(0x1F);
-        sim.process_command("<C1F5002>").unwrap();
-        let d_command = "<Dxx07000000000320>";
-        let psu_num = 0x07; let i_cal = 0x0; let i_mon = 0x0;
-        let v_cal_off = 0x0032; let pos_neg = 0;
+        sim.process_command(b"<C1F5002>").unwrap();
+        let d_command = b"<Dxx07000000000320>";
+        let psu_num = 0x07;
+        let i_cal = 0x0;
+        let i_mon = 0x0;
+        let v_cal_off = 0x0032;
+        let pos_neg = 0;
         let expected_checksum = psu_num + i_cal + i_mon + v_cal_off + pos_neg;
         sim.process_command(d_command).unwrap();
         let psu = &sim.psus[0];
         assert_eq!(psu.v_cal_offset_val, 0.5);
         assert_eq!(psu.pos_neg_v, 0);
-        let end_response = sim.process_command("<C1F5003>").unwrap();
+        let end_response = sim.process_command(b"<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
     fn s_command_updates_sine_wave_state() {
         let mut sim = Simulator::new(0x1F);
-        sim.process_command("<C1F5002>").unwrap();
+        sim.process_command(b"<C1F5002>").unwrap();
 
         // S<sw_num=01><used=1><type=0><reset=0A><duty=14><freq=03><offset=190><amp=258>
-        let s_command = "<Sxx01100A1403190258>";
+        let s_command = b"<Sxx01100A1403190258>";
 
-        let s1 = 0x258; let s2 = 0x190; let s3 = 0x03; let s4 = 0x14;
-        let s5 = 0x0A; let s6 = 0x0; let s7 = 1; let s8 = 1;
+        let s1 = 0x258;
+        let s2 = 0x190;
+        let s3 = 0x03;
+        let s4 = 0x14;
+        let s5 = 0x0A;
+        let s6 = 0x0;
+        let s7 = 1;
+        let s8 = 1;
         let expected_checksum = s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8;
 
         sim.process_command(s_command).unwrap();
@@ -973,20 +1039,27 @@ mod tests {
         assert_eq!(sw.duty_cycle, 0x14);
         assert_eq!(sw.reset_value, 0x0A);
 
-        let end_response = sim.process_command("<C1F5003>").unwrap();
+        let end_response = sim.process_command(b"<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
     fn e_command_updates_system_config() {
         let mut sim = Simulator::new(0x1F);
-        sim.process_command("<C1F5002>").unwrap();
+        sim.process_command(b"<C1F5002>").unwrap();
 
         // Exx<delay=01F4><step_en=01><retries=05><auto_reset=01><temp_err=01><seq_en=1><clk_err=1><i_err=1><v_err=1>
-        let e_command = "<Exx01F4010501011111>";
+        let e_command = b"<Exx01F4010501011111>";
 
-        let s1 = 1; let s2 = 1; let s3 = 1; let s4 = 1;
-        let s5 = 0x01; let s6 = 0x01; let s7 = 0x05; let s8 = 0x01; let s9 = 0x01F4;
+        let s1 = 1;
+        let s2 = 1;
+        let s3 = 1;
+        let s4 = 1;
+        let s5 = 0x01;
+        let s6 = 0x01;
+        let s7 = 0x05;
+        let s8 = 0x01;
+        let s9 = 0x01F4;
         let expected_checksum = s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8 + s9;
 
         sim.process_command(e_command).unwrap();
@@ -1002,17 +1075,17 @@ mod tests {
         assert_eq!(config.psu_step_enabled, true);
         assert_eq!(config.psu_step_delay, 500);
 
-        let end_response = sim.process_command("<C1F5003>").unwrap();
+        let end_response = sim.process_command(b"<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
     fn a_command_updates_system_config() {
         let mut sim = Simulator::new(0x1F);
-        sim.process_command("<C1F5002>").unwrap();
+        sim.process_command(b"<C1F5002>").unwrap();
 
         // Axx<s3=1><s2=064><s1=00C8><s4=00><s6=1><s5=000A><padding=00>
-        let a_command = "<Axx106400C80001000A00>";
+        let a_command = b"<Axx106400C80001000A00>";
 
         let s1 = 0x00C8; // cal_temp
         let s2 = 0x064;  // offset
@@ -1030,17 +1103,17 @@ mod tests {
         assert_eq!(config.power_up_delay, 10);
         assert_eq!(config.set_point_enabled, true);
 
-        let end_response = sim.process_command("<C1F5003>").unwrap();
+        let end_response = sim.process_command(b"<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
     fn f_command_updates_clock_config() {
         let mut sim = Simulator::new(0x1F);
-        sim.process_command("<C1F5002>").unwrap();
+        sim.process_command(b"<C1F5002>").unwrap();
 
         // Fxx<s9=1><s8=1><s7=00><s6=0A><s5=0><s4=CD><s3=AB><s2=FF><s1=FF>
-        let f_command = "<Fxx11000A0CDABFFFF>";
+        let f_command = b"<Fxx11000A0CDABFFFF>";
 
         let expected_checksum = "11000A0CDABFFFF".chars().fold(0, |acc, c| acc + c.to_digit(16).unwrap());
 
@@ -1053,20 +1126,26 @@ mod tests {
         assert_eq!(config.clk32_mon_filter, !0xFFFF);
         assert_eq!(config.clk64_mon_filter, !0xCDAB);
 
-        let end_response = sim.process_command("<C1F5003>").unwrap();
+        let end_response = sim.process_command(b"<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
     fn j_command_updates_sequence_delays() {
         let mut sim = Simulator::new(0x1F);
-        sim.process_command("<C1F5002>").unwrap();
+        sim.process_command(b"<C1F5002>").unwrap();
 
         // Jxx<s1=1><s2=0><s3=64><s4=64><s5=00><s6=00><s7=64><s8=64>
-        let j_command = "<Jxx10646400006464>";
+        let j_command = b"<Jxx10646400006464>";
 
-        let s1 = 1; let s2 = 0; let s3 = 0x64; let s4 = 0x64;
-        let s5 = 0x00; let s6 = 0x00; let s7 = 0x64; let s8 = 0x64;
+        let s1 = 1;
+        let s2 = 0;
+        let s3 = 0x64;
+        let s4 = 0x64;
+        let s5 = 0x00;
+        let s6 = 0x00;
+        let s7 = 0x64;
+        let s8 = 0x64;
         let expected_checksum = s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8;
 
         sim.process_command(j_command).unwrap();
@@ -1081,17 +1160,17 @@ mod tests {
         assert_eq!(config.seq_off_delay_1, 100);
         assert_eq!(config.seq_on_delay_1, 100);
 
-        let end_response = sim.process_command("<C1F5003>").unwrap();
+        let end_response = sim.process_command(b"<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
     fn l_command_updates_loop_config() {
         let mut sim = Simulator::new(0x1F);
-        sim.process_command("<C1F5002>").unwrap();
+        sim.process_command(b"<C1F5002>").unwrap();
 
         // Lxx<loop=01><count=0A><end=FF><start=00>
-        let l_command = "<Lxx010AFF00>";
+        let l_command = b"<Lxx010AFF00>";
 
         let s1 = 0x01; // loop num
         let s2 = 0x00; // start
@@ -1106,17 +1185,17 @@ mod tests {
         assert_eq!(p_loop.end_address, 0xFF);
         assert_eq!(p_loop.count, 0x0A);
 
-        let end_response = sim.process_command("<C1F5003>").unwrap();
+        let end_response = sim.process_command(b"<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
     fn x_command_updates_clock_and_loop_config() {
         let mut sim = Simulator::new(0x1F);
-        sim.process_command("<C1F5002>").unwrap();
+        sim.process_command(b"<C1F5002>").unwrap();
 
         // Xxx<f_low=28><f_high=00><p_low=14><p_high=00><src=0><loops=0F>
-        let x_command = "<Xxx2800140000F>";
+        let x_command = b"<Xxx2800140000F>";
 
         let s1 = 0x28; // f_low
         let s2 = 0x00; // f_high
@@ -1134,20 +1213,26 @@ mod tests {
         assert_eq!(clock.source, 0);
         assert_eq!(sim.loop_enables, 0x0F);
 
-        let end_response = sim.process_command("<C1F5003>").unwrap();
+        let end_response = sim.process_command(b"<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
     fn n_command_updates_repeat_counts() {
         let mut sim = Simulator::new(0x1F);
-        sim.process_command("<C1F5002>").unwrap();
+        sim.process_command(b"<C1F5002>").unwrap();
 
         // Nxx<s8=01><s7=02><s6=03><s5=04><s4=05><s3=06><s2=07><s1=08>
-        let n_command = "<Nxx0102030405060708>";
+        let n_command = b"<Nxx0102030405060708>";
 
-        let s1 = 0x08; let s2 = 0x07; let s3 = 0x06; let s4 = 0x05;
-        let s5 = 0x04; let s6 = 0x03; let s7 = 0x02; let s8 = 0x01;
+        let s1 = 0x08;
+        let s2 = 0x07;
+        let s3 = 0x06;
+        let s4 = 0x05;
+        let s5 = 0x04;
+        let s6 = 0x03;
+        let s7 = 0x02;
+        let s8 = 0x01;
         let expected_checksum = s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8;
 
         sim.process_command(n_command).unwrap();
@@ -1155,20 +1240,26 @@ mod tests {
         assert_eq!(sim.repeat_count_1, 0x05060708);
         assert_eq!(sim.repeat_count_2, 0x01020304);
 
-        let end_response = sim.process_command("<C1F5003>").unwrap();
+        let end_response = sim.process_command(b"<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
     fn g_command_updates_frc_frequency() {
         let mut sim = Simulator::new(0x1F);
-        sim.process_command("<C1F5002>").unwrap();
+        sim.process_command(b"<C1F5002>").unwrap();
 
         // Gxx<s8=01><s7=02><s6=03><s5=04><s4=05><s3=06><s2=07><s1=08>
-        let g_command = "<Gxx0102030405060708>";
+        let g_command = b"<Gxx0102030405060708>";
 
-        let s1 = 0x08; let s2 = 0x07; let s3 = 0x06; let s4 = 0x05;
-        let s5 = 0x04; let s6 = 0x03; let s7 = 0x02; let s8 = 0x01;
+        let s1 = 0x08;
+        let s2 = 0x07;
+        let s3 = 0x06;
+        let s4 = 0x05;
+        let s5 = 0x04;
+        let s6 = 0x03;
+        let s7 = 0x02;
+        let s8 = 0x01;
         let expected_checksum = s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8;
 
         sim.process_command(g_command).unwrap();
@@ -1176,20 +1267,26 @@ mod tests {
         assert_eq!(sim.frc_config.frequency_1_4, 0x05060708);
         assert_eq!(sim.frc_config.frequency_5_8, 0x01020304);
 
-        let end_response = sim.process_command("<C1F5003>").unwrap();
+        let end_response = sim.process_command(b"<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
     fn h_command_updates_frc_period() {
         let mut sim = Simulator::new(0x1F);
-        sim.process_command("<C1F5002>").unwrap();
+        sim.process_command(b"<C1F5002>").unwrap();
 
         // Hxx<s8=11><s7=22><s6=33><s5=44><s4=55><s3=66><s2=77><s1=88>
-        let h_command = "<Hxx1122334455667788>";
+        let h_command = b"<Hxx1122334455667788>";
 
-        let s1 = 0x88; let s2 = 0x77; let s3 = 0x66; let s4 = 0x55;
-        let s5 = 0x44; let s6 = 0x33; let s7 = 0x22; let s8 = 0x11;
+        let s1 = 0x88;
+        let s2 = 0x77;
+        let s3 = 0x66;
+        let s4 = 0x55;
+        let s5 = 0x44;
+        let s6 = 0x33;
+        let s7 = 0x22;
+        let s8 = 0x11;
         let expected_checksum = s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8;
 
         sim.process_command(h_command).unwrap();
@@ -1197,20 +1294,26 @@ mod tests {
         assert_eq!(sim.frc_config.period_1_4, 0x55667788);
         assert_eq!(sim.frc_config.period_5_8, 0x11223344);
 
-        let end_response = sim.process_command("<C1F5003>").unwrap();
+        let end_response = sim.process_command(b"<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
     fn k_command_updates_frc_source() {
         let mut sim = Simulator::new(0x1F);
-        sim.process_command("<C1F5002>").unwrap();
+        sim.process_command(b"<C1F5002>").unwrap();
 
         // Kxx<s8=1><s7=2><s6=3><s5=4><s4=5><s3=6><s2=7><s1=8>
-        let k_command = "<Kxx12345678>";
+        let k_command = b"<Kxx12345678>";
 
-        let s1 = 8; let s2 = 7; let s3 = 6; let s4 = 5;
-        let s5 = 4; let s6 = 3; let s7 = 2; let s8 = 1;
+        let s1 = 8;
+        let s2 = 7;
+        let s3 = 6;
+        let s4 = 5;
+        let s5 = 4;
+        let s6 = 3;
+        let s7 = 2;
+        let s8 = 1;
         let expected_checksum = s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8;
 
         sim.process_command(k_command).unwrap();
@@ -1218,26 +1321,96 @@ mod tests {
         assert_eq!(sim.frc_config.source_1_4, 0x05060708);
         assert_eq!(sim.frc_config.source_5_8, 0x01020304);
 
-        let end_response = sim.process_command("<C1F5003>").unwrap();
+        let end_response = sim.process_command(b"<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
     fn o_command_updates_output_routing() {
         let mut sim = Simulator::new(0x1F);
-        sim.process_command("<C1F5002>").unwrap();
+        sim.process_command(b"<C1F5002>").unwrap();
 
         // Oxx<group=09><s2=01><s3=02><s4=03><s5=04>
-        let o_command = "<Oxx0901020304>";
+        let o_command = b"<Oxx0901020304>";
 
-        let s1 = 0x09; let s2 = 0x01; let s3 = 0x02; let s4 = 0x03; let s5 = 0x04;
+        let s1 = 0x09;
+        let s2 = 0x01;
+        let s3 = 0x02;
+        let s4 = 0x03;
+        let s5 = 0x04;
         let expected_checksum = s1 + s2 + s3 + s4 + s5;
 
         sim.process_command(o_command).unwrap();
 
         assert_eq!(sim.output_routing[8], 0x04030201); // Group 9 is index 8
 
-        let end_response = sim.process_command("<C1F5003>").unwrap();
+        let end_response = sim.process_command(b"<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+    }
+
+    #[test]
+    fn p_command_loads_data_one_fpga() {
+        let mut sim = Simulator::new(0x1F);
+        sim.fpgas[1].present = false; // Ensure single FPGA mode
+        sim.process_command(b"<C1F5000>").unwrap(); // Start pattern loading
+
+        // P<data1><\ctrl1><data2><\ctrl2><data3><\ctrl3><data4><\ctrl4>
+        let p_command = b"<P\x01\x02\x03\x04\x11\x05\x06\x07\x08\x22\x09\x0A\x0B\x0C\x33\x0D\x0E\x0F\x10\x44>";
+
+        let data1 = 0x04030201;
+        let ctrl1 = 0x11;
+        let data2 = 0x08070605;
+        let ctrl2 = 0x22;
+        let data3 = 0x0C0B0A09;
+        let ctrl3 = 0x33;
+        let data4 = 0x100F0E0D;
+        let ctrl4 = 0x44;
+
+        let checksum = (ctrl1 + ctrl2 + ctrl3 + ctrl4) +
+            (0x01 + 0x02 + 0x03 + 0x04) + (0x05 + 0x06 + 0x07 + 0x08) +
+            (0x09 + 0x0A + 0x0B + 0x0C) + (0x0D + 0x0E + 0x0F + 0x10);
+
+        sim.process_command(p_command).unwrap();
+
+        assert_eq!(sim.fpgas[0].pattern_memory_a[1], data1);
+        assert_eq!(sim.fpgas[0].pattern_memory_a[2], data2);
+        assert_eq!(sim.fpgas[0].pattern_memory_a[3], data3);
+        assert_eq!(sim.fpgas[0].pattern_memory_a[4], data4);
+        assert_eq!(sim.sram_address, 5);
+
+        let end_response = sim.process_command(b"<C1F5001>").unwrap();
+        assert_eq!(end_response, Some(format!("#{},5,#", checksum)));
+    }
+
+    #[test]
+    fn p_command_loads_data_two_fpgas() {
+        let mut sim = Simulator::new(0x1F);
+        sim.fpgas[1].present = true; // Ensure dual FPGA mode
+        sim.process_command(b"<C1F5000>").unwrap(); // Start pattern loading
+
+        // P<data1a><data1b><\ctrl1><data2a><data2b><\ctrl2>
+        let p_command = b"<P\x01\x02\x03\x04\x11\x12\x13\x14\xAA\x05\x06\x07\x08\x15\x16\x17\x18\xBB>";
+
+        let data1a = 0x04030201;
+        let data1b = 0x14131211;
+        let ctrl1 = 0xAA;
+        let data2a = 0x08070605;
+        let data2b = 0x18171615;
+        let ctrl2 = 0xBB;
+
+        let checksum = (ctrl1 + ctrl2) +
+            (0x01 + 0x02 + 0x03 + 0x04 + 0x11 + 0x12 + 0x13 + 0x14) +
+            (0x05 + 0x06 + 0x07 + 0x08 + 0x15 + 0x16 + 0x17 + 0x18);
+
+        sim.process_command(p_command).unwrap();
+
+        assert_eq!(sim.fpgas[0].pattern_memory_a[1], data1a);
+        assert_eq!(sim.fpgas[1].pattern_memory_a[1], data1b);
+        assert_eq!(sim.fpgas[0].pattern_memory_a[2], data2a);
+        assert_eq!(sim.fpgas[1].pattern_memory_a[2], data2b);
+        assert_eq!(sim.sram_address, 3);
+
+        let end_response = sim.process_command(b"<C1F5001>").unwrap();
+        assert_eq!(end_response, Some(format!("#{},3,#", checksum)));
     }
 }

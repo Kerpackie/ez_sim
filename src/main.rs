@@ -29,8 +29,8 @@ fn main() {
                     continue;
                 }
 
-                // Pass the command to our library and handle the result.
-                match simulator.process_command(command) {
+                // Pass the command as a byte slice to our library and handle the result.
+                match simulator.process_command(command.as_bytes()) {
                     Ok(Some(response)) => {
                         println!("< {}", response);
                     }

@@ -146,6 +146,13 @@ pub struct MainClockConfig {
     pub source: u32,
 }
 
+// Represents the Fractional Clock (FRC) configuration.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct FrcConfig {
+    pub frequency_1_4: u32,
+    pub frequency_5_8: u32,
+}
+
 // The main struct that holds the entire state of the simulated driver board.
 #[derive(Debug, Clone)]
 pub struct Simulator {
@@ -171,6 +178,8 @@ pub struct Simulator {
     pub loop_enables: u32,
     pub repeat_count_1: u32,
     pub repeat_count_2: u32,
+    // Fractional Clock configuration
+    pub frc_config: FrcConfig,
     // --- Internal state for data loading sessions ---
     sram_address: u32,
     pattern_data_checksum: u32,
@@ -196,6 +205,7 @@ impl Simulator {
             loop_enables: 0,
             repeat_count_1: 0,
             repeat_count_2: 0,
+            frc_config: Default::default(),
             sram_address: 1,
             pattern_data_checksum: 0,
             driver_data_checksum: 0,
@@ -291,6 +301,10 @@ impl Simulator {
                     }
                     'N' => {
                         self.handle_n_command(content)?;
+                        return Ok(None); // Data commands are silent
+                    }
+                    'G' => {
+                        self.handle_g_command(content)?;
                         return Ok(None); // Data commands are silent
                     }
                     _ => {} // Fall through to 'C' command check
@@ -661,6 +675,27 @@ impl Simulator {
         // Reconstruct the 32-bit values in little-endian order, matching the C code.
         self.repeat_count_1 = u32::from_le_bytes([sram1 as u8, sram2 as u8, sram3 as u8, sram4 as u8]);
         self.repeat_count_2 = u32::from_le_bytes([sram5 as u8, sram6 as u8, sram7 as u8, sram8 as u8]);
+
+        self.driver_data_checksum += sram1 + sram2 + sram3 + sram4 + sram5 + sram6 + sram7 + sram8;
+        Ok(())
+    }
+
+    /// Parses a 'G' command, updates FRC frequencies, and updates the checksum.
+    fn handle_g_command(&mut self, content: &str) -> Result<(), CommandError> {
+        if content.len() < 19 { return Err(CommandError::TooShort); }
+        let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
+
+        let sram8 = parse_hex(3, 5)?;
+        let sram7 = parse_hex(5, 7)?;
+        let sram6 = parse_hex(7, 9)?;
+        let sram5 = parse_hex(9, 11)?;
+        let sram4 = parse_hex(11, 13)?;
+        let sram3 = parse_hex(13, 15)?;
+        let sram2 = parse_hex(15, 17)?;
+        let sram1 = parse_hex(17, 19)?;
+
+        self.frc_config.frequency_1_4 = u32::from_le_bytes([sram1 as u8, sram2 as u8, sram3 as u8, sram4 as u8]);
+        self.frc_config.frequency_5_8 = u32::from_le_bytes([sram5 as u8, sram6 as u8, sram7 as u8, sram8 as u8]);
 
         self.driver_data_checksum += sram1 + sram2 + sram3 + sram4 + sram5 + sram6 + sram7 + sram8;
         Ok(())
@@ -1038,6 +1073,27 @@ mod tests {
 
         assert_eq!(sim.repeat_count_1, 0x05060708);
         assert_eq!(sim.repeat_count_2, 0x01020304);
+
+        let end_response = sim.process_command("<C1F5003>").unwrap();
+        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+    }
+
+    #[test]
+    fn g_command_updates_frc_frequency() {
+        let mut sim = Simulator::new(0x1F);
+        sim.process_command("<C1F5002>").unwrap();
+
+        // Gxx<s8=01><s7=02><s6=03><s5=04><s4=05><s3=06><s2=07><s1=08>
+        let g_command = "<Gxx0102030405060708>";
+
+        let s1 = 0x08; let s2 = 0x07; let s3 = 0x06; let s4 = 0x05;
+        let s5 = 0x04; let s6 = 0x03; let s7 = 0x02; let s8 = 0x01;
+        let expected_checksum = s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8;
+
+        sim.process_command(g_command).unwrap();
+
+        assert_eq!(sim.frc_config.frequency_1_4, 0x05060708);
+        assert_eq!(sim.frc_config.frequency_5_8, 0x01020304);
 
         let end_response = sim.process_command("<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));

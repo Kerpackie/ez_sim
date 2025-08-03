@@ -184,6 +184,8 @@ pub struct Simulator {
     pub repeat_count_2: u32,
     // Fractional Clock configuration
     pub frc_config: FrcConfig,
+    // Output routing configuration
+    pub output_routing: [u32; 16],
     // --- Internal state for data loading sessions ---
     sram_address: u32,
     pattern_data_checksum: u32,
@@ -210,6 +212,7 @@ impl Simulator {
             repeat_count_1: 0,
             repeat_count_2: 0,
             frc_config: Default::default(),
+            output_routing: [0; 16],
             sram_address: 1,
             pattern_data_checksum: 0,
             driver_data_checksum: 0,
@@ -317,6 +320,10 @@ impl Simulator {
                     }
                     'K' => {
                         self.handle_k_command(content)?;
+                        return Ok(None); // Data commands are silent
+                    }
+                    'O' => {
+                        self.handle_o_command(content)?;
                         return Ok(None); // Data commands are silent
                     }
                     _ => {} // Fall through to 'C' command check
@@ -752,6 +759,26 @@ impl Simulator {
         self.frc_config.source_5_8 = u32::from_le_bytes([sram5 as u8, sram6 as u8, sram7 as u8, sram8 as u8]);
 
         self.driver_data_checksum += sram1 + sram2 + sram3 + sram4 + sram5 + sram6 + sram7 + sram8;
+        Ok(())
+    }
+
+    /// Parses an 'O' command, updates output routing, and updates the checksum.
+    fn handle_o_command(&mut self, content: &str) -> Result<(), CommandError> {
+        if content.len() < 13 { return Err(CommandError::TooShort); }
+        let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
+
+        let sram1_group = parse_hex(3, 5)? as usize;
+        let sram2 = parse_hex(5, 7)?;
+        let sram3 = parse_hex(7, 9)?;
+        let sram4 = parse_hex(9, 11)?;
+        let sram5 = parse_hex(11, 13)?;
+
+        if sram1_group > 0 && sram1_group <= self.output_routing.len() {
+            let routing_value = u32::from_le_bytes([sram2 as u8, sram3 as u8, sram4 as u8, sram5 as u8]);
+            self.output_routing[sram1_group - 1] = routing_value;
+        }
+
+        self.driver_data_checksum += sram1_group as u32 + sram2 + sram3 + sram4 + sram5;
         Ok(())
     }
 }
@@ -1190,6 +1217,25 @@ mod tests {
 
         assert_eq!(sim.frc_config.source_1_4, 0x05060708);
         assert_eq!(sim.frc_config.source_5_8, 0x01020304);
+
+        let end_response = sim.process_command("<C1F5003>").unwrap();
+        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+    }
+
+    #[test]
+    fn o_command_updates_output_routing() {
+        let mut sim = Simulator::new(0x1F);
+        sim.process_command("<C1F5002>").unwrap();
+
+        // Oxx<group=09><s2=01><s3=02><s4=03><s5=04>
+        let o_command = "<Oxx0901020304>";
+
+        let s1 = 0x09; let s2 = 0x01; let s3 = 0x02; let s4 = 0x03; let s5 = 0x04;
+        let expected_checksum = s1 + s2 + s3 + s4 + s5;
+
+        sim.process_command(o_command).unwrap();
+
+        assert_eq!(sim.output_routing[8], 0x04030201); // Group 9 is index 8
 
         let end_response = sim.process_command("<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));

@@ -148,6 +148,14 @@ pub struct SystemConfig {
     pub sigs_mod_sequence_off: u32,
 }
 
+// Represents the Power Temperature Cycling (PTC) configuration.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct PtcConfig {
+    pub enabled: bool,
+    pub on_time_seconds: u32,
+    pub off_time_seconds: u32,
+}
+
 // Represents the configuration for a single pattern loop.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct PatternLoop {
@@ -195,6 +203,8 @@ pub struct Simulator {
     pub alarm_values: [u32; 4],
     // System configuration
     pub system_config: SystemConfig,
+    // Power Temperature Cycling configuration
+    pub ptc_config: PtcConfig,
     // Micro-stepping global enable flag
     pub ustep_enabled: bool,
     // Pattern Loop configuration
@@ -228,6 +238,7 @@ impl Simulator {
             timer_values: [0; 4],
             alarm_values: [0; 4],
             system_config: Default::default(),
+            ptc_config: Default::default(),
             ustep_enabled: false,
             pattern_loops: Default::default(),
             main_clock_config: Default::default(),
@@ -320,6 +331,7 @@ impl Simulator {
                 b'K' => { self.handle_k_command(content_bytes)?; return Ok(None); }
                 b'O' => { self.handle_o_command(content_bytes)?; return Ok(None); }
                 b'M' => { self.handle_m_command(content_bytes)?; return Ok(None); }
+                b'Z' => { self.handle_z_command(content_bytes)?; return Ok(None); }
                 _ => {} // Fall through to 'C' command check
             }
         }
@@ -454,6 +466,31 @@ impl Simulator {
         }
 
         self.driver_data_checksum += sram1 + sram2 + sram3_delay + sram4_enable + sram5_steps + sram6_psu_num as u32;
+        Ok(())
+    }
+
+    /// Parses a 'Z' command, updates PTC config, and updates the checksum.
+    fn handle_z_command(&mut self, content_bytes: &[u8]) -> Result<(), CommandError> {
+        let content = std::str::from_utf8(content_bytes).map_err(|_| CommandError::InvalidParameter)?;
+        if content.len() < 15 { return Err(CommandError::TooShort); }
+        let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
+
+        let sram1_enabled = parse_hex(3, 5)?;
+        let sram2_on_time = parse_hex(5, 9)?;
+        let sram3_off_time = parse_hex(9, 13)?;
+        let sram4_unit_type = parse_hex(13, 15)?;
+
+        self.ptc_config.enabled = sram1_enabled == 1;
+
+        if sram4_unit_type == 1 { // Time is in seconds
+            self.ptc_config.on_time_seconds = sram2_on_time;
+            self.ptc_config.off_time_seconds = sram3_off_time;
+        } else { // Time is in minutes (default)
+            self.ptc_config.on_time_seconds = sram2_on_time * 60;
+            self.ptc_config.off_time_seconds = sram3_off_time * 60;
+        }
+
+        self.driver_data_checksum += sram1_enabled + sram2_on_time + sram3_off_time + sram4_unit_type;
         Ok(())
     }
 
@@ -1533,6 +1570,54 @@ mod tests {
         let psu = &sim.psus[1]; // PSU #2 is at index 1
         assert_eq!(psu.ustep_steps, 100);
         assert_eq!(psu.ustep_delay, 200);
+
+        let end_response = sim.process_command(b"<C1F5003>").unwrap();
+        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+    }
+
+    #[test]
+    fn z_command_updates_ptc_config_minutes() {
+        let mut sim = Simulator::new(0x1F);
+        sim.process_command(b"<C1F5002>").unwrap(); // Start driver loading
+
+        // Zxx<enabled=01><on_time=000A><off_time=001E><unit_type=00>
+        let z_command = b"<Zxx01000A001E00>";
+
+        let s1 = 0x01; // enabled
+        let s2 = 0x0A; // on_time (10 mins)
+        let s3 = 0x1E; // off_time (30 mins)
+        let s4 = 0x00; // unit_type (minutes)
+        let expected_checksum = s1 + s2 + s3 + s4;
+
+        sim.process_command(z_command).unwrap();
+
+        assert_eq!(sim.ptc_config.enabled, true);
+        assert_eq!(sim.ptc_config.on_time_seconds, 10 * 60);
+        assert_eq!(sim.ptc_config.off_time_seconds, 30 * 60);
+
+        let end_response = sim.process_command(b"<C1F5003>").unwrap();
+        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+    }
+
+    #[test]
+    fn z_command_updates_ptc_config_seconds() {
+        let mut sim = Simulator::new(0x1F);
+        sim.process_command(b"<C1F5002>").unwrap(); // Start driver loading
+
+        // Zxx<enabled=01><on_time=003C><off_time=00B4><unit_type=01>
+        let z_command = b"<Zxx01003C00B401>";
+
+        let s1 = 0x01; // enabled
+        let s2 = 0x3C; // on_time (60s)
+        let s3 = 0xB4; // off_time (180s)
+        let s4 = 0x01; // unit_type (seconds)
+        let expected_checksum = s1 + s2 + s3 + s4;
+
+        sim.process_command(z_command).unwrap();
+
+        assert_eq!(sim.ptc_config.enabled, true);
+        assert_eq!(sim.ptc_config.on_time_seconds, 60);
+        assert_eq!(sim.ptc_config.off_time_seconds, 180);
 
         let end_response = sim.process_command(b"<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));

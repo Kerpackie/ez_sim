@@ -184,7 +184,7 @@ pub struct AmonTest {
     pub tp1_discharge_time: u32,
     pub tp2_discharge_time: u32,
     pub unit_type: u32,
-    // Fields for 'I' command
+    // Fields for 'I' and 'Y' commands
     pub cal_gain: f32,
     pub cal_offset: f32,
     pub high_limit: f32,
@@ -376,6 +376,7 @@ impl Simulator {
                 b'U' => { self.handle_u_command(content_bytes)?; return Ok(None); }
                 b'B' => { self.handle_b_command(content_bytes)?; return Ok(None); }
                 b'I' => { self.handle_i_command(content_bytes)?; return Ok(None); }
+                b'Y' => { self.handle_y_command(content_bytes)?; return Ok(None); }
                 _ => {} // Fall through to 'C' command check
             }
         }
@@ -691,6 +692,30 @@ impl Simulator {
         }
         self.driver_data_checksum += checksum_update;
 
+        Ok(())
+    }
+
+    /// Parses a 'Y' command, updates AMON calibration and metadata, and updates the checksum.
+    fn handle_y_command(&mut self, content_bytes: &[u8]) -> Result<(), CommandError> {
+        let content = std::str::from_utf8(content_bytes).map_err(|_| CommandError::InvalidParameter)?;
+        if content.len() < 17 { return Err(CommandError::TooShort); }
+        let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
+
+        let test_num = parse_hex(3, 5)? as usize;
+        let cal_gain = parse_hex(5, 9)?;
+        let cal_offset = parse_hex(9, 13)?;
+        let board = parse_hex(13, 15)?;
+        let tag = parse_hex(15, 17)?;
+
+        if test_num > 0 && test_num <= self.amon_tests.len() {
+            let test = &mut self.amon_tests[test_num - 1];
+            test.cal_gain = cal_gain as f32 / 1000.0;
+            test.cal_offset = cal_offset as f32 / 1000.0;
+            test.board = board;
+            test.tag = tag;
+        }
+
+        self.driver_data_checksum += cal_gain + cal_offset + test_num as u32 + board + tag;
         Ok(())
     }
 
@@ -1971,6 +1996,33 @@ mod tests {
         let checksum4 = 7 + 2 + (0x3+0xD+0xC+0xC+0xC+0xC+0xC+0xD);
         let expected_checksum = checksum1 + checksum2 + checksum3 + checksum4;
 
+        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+    }
+
+    #[test]
+    fn y_command_updates_amon_cal_and_metadata() {
+        let mut sim = Simulator::new(0x1F);
+        sim.process_command(b"<C1F5002>").unwrap(); // Start driver loading
+
+        // Yxx<test=01><gain=03E8><offset=07D0><board=0A><tag=0B>
+        let y_command = b"<Yxx0103E807D00A0B>";
+
+        let test_num = 0x01;
+        let gain = 0x03E8; // 1000
+        let offset = 0x07D0; // 2000
+        let board = 0x0A;
+        let tag = 0x0B;
+        let expected_checksum = gain + offset + test_num + board + tag;
+
+        sim.process_command(y_command).unwrap();
+
+        let test = &sim.amon_tests[0]; // Test #1 is at index 0
+        assert_eq!(test.cal_gain, 1.0);
+        assert_eq!(test.cal_offset, 2.0);
+        assert_eq!(test.board, 10);
+        assert_eq!(test.tag, 11);
+
+        let end_response = sim.process_command(b"<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
     }
 }

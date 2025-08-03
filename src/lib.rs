@@ -156,6 +156,19 @@ pub struct PtcConfig {
     pub off_time_seconds: u32,
 }
 
+// Represents the configuration for a single AMON/DUTMON test.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct AmonTest {
+    pub test_type: u32,
+    pub tp1_mux_ch: u32,
+    pub tp1_amon_mux_a: u32,
+    pub tp1_amon_mux_b: u32,
+    pub tp2_mux_ch: u32,
+    pub tp2_amon_mux_a: u32,
+    pub tp2_amon_mux_b: u32,
+    pub psu_link: u32,
+}
+
 // Represents the configuration for a single pattern loop.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct PatternLoop {
@@ -205,6 +218,8 @@ pub struct Simulator {
     pub system_config: SystemConfig,
     // Power Temperature Cycling configuration
     pub ptc_config: PtcConfig,
+    // AMON/DUTMON test configurations
+    pub amon_tests: Vec<AmonTest>,
     // Micro-stepping global enable flag
     pub ustep_enabled: bool,
     // Pattern Loop configuration
@@ -239,6 +254,7 @@ impl Simulator {
             alarm_values: [0; 4],
             system_config: Default::default(),
             ptc_config: Default::default(),
+            amon_tests: vec![AmonTest::default(); 100], // Pre-allocate for 100 tests
             ustep_enabled: false,
             pattern_loops: Default::default(),
             main_clock_config: Default::default(),
@@ -332,6 +348,7 @@ impl Simulator {
                 b'O' => { self.handle_o_command(content_bytes)?; return Ok(None); }
                 b'M' => { self.handle_m_command(content_bytes)?; return Ok(None); }
                 b'Z' => { self.handle_z_command(content_bytes)?; return Ok(None); }
+                b'W' => { self.handle_w_command(content_bytes)?; return Ok(None); }
                 _ => {} // Fall through to 'C' command check
             }
         }
@@ -491,6 +508,38 @@ impl Simulator {
         }
 
         self.driver_data_checksum += sram1_enabled + sram2_on_time + sram3_off_time + sram4_unit_type;
+        Ok(())
+    }
+
+    /// Parses a 'W' command, updates AMON test config, and updates the checksum.
+    fn handle_w_command(&mut self, content_bytes: &[u8]) -> Result<(), CommandError> {
+        let content = std::str::from_utf8(content_bytes).map_err(|_| CommandError::InvalidParameter)?;
+        if content.len() < 21 { return Err(CommandError::TooShort); }
+        let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
+
+        let sram8_test_num = parse_hex(3, 5)? as usize;
+        let sram7_type = parse_hex(5, 7)?;
+        let sram6_tp1_mux = parse_hex(7, 9)?;
+        let sram5_tp1_amon_a = parse_hex(9, 11)?;
+        let sram4_tp1_amon_b = parse_hex(11, 13)?;
+        let sram3_tp2_mux = parse_hex(13, 15)?;
+        let sram2_tp2_amon_a = parse_hex(15, 17)?;
+        let sram1_tp2_amon_b = parse_hex(17, 19)?;
+        let sram9_psu_link = parse_hex(19, 21)?;
+
+        if sram8_test_num > 0 && sram8_test_num <= self.amon_tests.len() {
+            let test = &mut self.amon_tests[sram8_test_num - 1];
+            test.test_type = sram7_type;
+            test.tp1_mux_ch = sram6_tp1_mux;
+            test.tp1_amon_mux_a = sram5_tp1_amon_a;
+            test.tp1_amon_mux_b = sram4_tp1_amon_b;
+            test.tp2_mux_ch = sram3_tp2_mux;
+            test.tp2_amon_mux_a = sram2_tp2_amon_a;
+            test.tp2_amon_mux_b = sram1_tp2_amon_b;
+            test.psu_link = sram9_psu_link;
+        }
+
+        self.driver_data_checksum += sram1_tp2_amon_b + sram2_tp2_amon_a + sram3_tp2_mux + sram4_tp1_amon_b + sram5_tp1_amon_a + sram6_tp1_mux + sram7_type + sram8_test_num as u32 + sram9_psu_link;
         Ok(())
     }
 
@@ -1618,6 +1667,41 @@ mod tests {
         assert_eq!(sim.ptc_config.enabled, true);
         assert_eq!(sim.ptc_config.on_time_seconds, 60);
         assert_eq!(sim.ptc_config.off_time_seconds, 180);
+
+        let end_response = sim.process_command(b"<C1F5003>").unwrap();
+        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+    }
+
+    #[test]
+    fn w_command_updates_amon_test_config() {
+        let mut sim = Simulator::new(0x1F);
+        sim.process_command(b"<C1F5002>").unwrap(); // Start driver loading
+
+        // Wxx<test=01><type=02><tp1_mux=03><tp1_amon_a=04><tp1_amon_b=05><tp2_mux=06><tp2_amon_a=07><tp2_amon_b=08><psu_link=09>
+        let w_command = b"<Wxx010203040506070809>";
+
+        let s8 = 0x01; // test num
+        let s7 = 0x02; // type
+        let s6 = 0x03; // tp1 mux
+        let s5 = 0x04; // tp1 amon a
+        let s4 = 0x05; // tp1 amon b
+        let s3 = 0x06; // tp2 mux
+        let s2 = 0x07; // tp2 amon a
+        let s1 = 0x08; // tp2 amon b
+        let s9 = 0x09; // psu link
+        let expected_checksum = s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8 + s9;
+
+        sim.process_command(w_command).unwrap();
+
+        let test = &sim.amon_tests[0]; // Test #1 is at index 0
+        assert_eq!(test.test_type, s7);
+        assert_eq!(test.tp1_mux_ch, s6);
+        assert_eq!(test.tp1_amon_mux_a, s5);
+        assert_eq!(test.tp1_amon_mux_b, s4);
+        assert_eq!(test.tp2_mux_ch, s3);
+        assert_eq!(test.tp2_amon_mux_a, s2);
+        assert_eq!(test.tp2_amon_mux_b, s1);
+        assert_eq!(test.psu_link, s9);
 
         let end_response = sim.process_command(b"<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));

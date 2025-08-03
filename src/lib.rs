@@ -75,6 +75,8 @@ pub struct Fpga {
     // Using a Vec<u32> to represent pattern memory words.
     pub pattern_memory_a: Vec<u32>,
     pub pattern_memory_b: Vec<u32>,
+    pub tristate_memory_a: Vec<u32>,
+    pub tristate_memory_b: Vec<u32>,
 }
 
 impl Default for Fpga {
@@ -85,6 +87,8 @@ impl Default for Fpga {
             // 0x100000 corresponds to 1M addresses.
             pattern_memory_a: vec![0; 0x100000],
             pattern_memory_b: vec![0; 0x100000],
+            tristate_memory_a: vec![0; 0x100000],
+            tristate_memory_b: vec![0; 0x100000],
         }
     }
 }
@@ -278,9 +282,16 @@ impl Simulator {
 
         // Handle data loading commands first if a session is active.
         if self.is_pattern_data_loading {
-            if content_bytes[0] == b'P' {
-                self.handle_p_command(content_bytes)?;
-                return Ok(None);
+            match content_bytes[0] {
+                b'P' => {
+                    self.handle_p_command(content_bytes)?;
+                    return Ok(None);
+                }
+                b'R' => {
+                    self.handle_r_command(content_bytes)?;
+                    return Ok(None);
+                }
+                _ => {}
             }
         }
 
@@ -814,6 +825,59 @@ impl Simulator {
             self.fpgas[0].pattern_memory_a[self.sram_address as usize] = sram3; self.sram_address += 1;
             self.fpgas[0].pattern_memory_a[self.sram_address as usize] = sram5; self.sram_address += 1;
             self.fpgas[0].pattern_memory_a[self.sram_address as usize] = sram7; self.sram_address += 1;
+
+            checksum_update += sram2 + sram4 + sram6 + sram8;
+            for &byte in &bytes[1..5] { checksum_update += byte as u32; }
+            for &byte in &bytes[6..10] { checksum_update += byte as u32; }
+            for &byte in &bytes[11..15] { checksum_update += byte as u32; }
+            for &byte in &bytes[16..20] { checksum_update += byte as u32; }
+        }
+
+        self.pattern_data_checksum += checksum_update;
+        Ok(())
+    }
+
+    /// Parses an 'R' command, updates FPGA tristate memory, and updates the checksum.
+    fn handle_r_command(&mut self, content_bytes: &[u8]) -> Result<(), CommandError> {
+        let bytes = content_bytes;
+        let mut checksum_update: u32 = 0;
+
+        if self.fpgas[1].present { // Two FPGAs
+            if bytes.len() < 19 { return Err(CommandError::TooShort); }
+            let sram1 = u32::from_le_bytes(bytes[1..5].try_into().unwrap());
+            let sram2 = u32::from_le_bytes(bytes[5..9].try_into().unwrap());
+            let sram3 = bytes[9] as u32;
+            let sram4 = u32::from_le_bytes(bytes[10..14].try_into().unwrap());
+            let sram5 = u32::from_le_bytes(bytes[14..18].try_into().unwrap());
+            let sram6 = bytes[18] as u32;
+
+            // Note the bitwise NOT, as seen in the C code.
+            self.fpgas[0].tristate_memory_a[self.sram_address as usize] = !sram1;
+            self.fpgas[1].tristate_memory_a[self.sram_address as usize] = !sram2;
+            self.sram_address += 1;
+            self.fpgas[0].tristate_memory_a[self.sram_address as usize] = !sram4;
+            self.fpgas[1].tristate_memory_a[self.sram_address as usize] = !sram5;
+            self.sram_address += 1;
+
+            checksum_update += sram3 + sram6;
+            for &byte in &bytes[1..9] { checksum_update += byte as u32; }
+            for &byte in &bytes[10..18] { checksum_update += byte as u32; }
+        } else { // One FPGA
+            if bytes.len() < 21 { return Err(CommandError::TooShort); }
+            let sram1 = u32::from_le_bytes(bytes[1..5].try_into().unwrap());
+            let sram2 = bytes[5] as u32;
+            let sram3 = u32::from_le_bytes(bytes[6..10].try_into().unwrap());
+            let sram4 = bytes[10] as u32;
+            let sram5 = u32::from_le_bytes(bytes[11..15].try_into().unwrap());
+            let sram6 = bytes[15] as u32;
+            let sram7 = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
+            let sram8 = bytes[20] as u32;
+
+            // Note the bitwise NOT.
+            self.fpgas[0].tristate_memory_a[self.sram_address as usize] = !sram1; self.sram_address += 1;
+            self.fpgas[0].tristate_memory_a[self.sram_address as usize] = !sram3; self.sram_address += 1;
+            self.fpgas[0].tristate_memory_a[self.sram_address as usize] = !sram5; self.sram_address += 1;
+            self.fpgas[0].tristate_memory_a[self.sram_address as usize] = !sram7; self.sram_address += 1;
 
             checksum_update += sram2 + sram4 + sram6 + sram8;
             for &byte in &bytes[1..5] { checksum_update += byte as u32; }

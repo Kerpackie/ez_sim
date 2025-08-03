@@ -151,6 +151,8 @@ pub struct MainClockConfig {
 pub struct FrcConfig {
     pub frequency_1_4: u32,
     pub frequency_5_8: u32,
+    pub period_1_4: u32,
+    pub period_5_8: u32,
 }
 
 // The main struct that holds the entire state of the simulated driver board.
@@ -305,6 +307,10 @@ impl Simulator {
                     }
                     'G' => {
                         self.handle_g_command(content)?;
+                        return Ok(None); // Data commands are silent
+                    }
+                    'H' => {
+                        self.handle_h_command(content)?;
                         return Ok(None); // Data commands are silent
                     }
                     _ => {} // Fall through to 'C' command check
@@ -696,6 +702,27 @@ impl Simulator {
 
         self.frc_config.frequency_1_4 = u32::from_le_bytes([sram1 as u8, sram2 as u8, sram3 as u8, sram4 as u8]);
         self.frc_config.frequency_5_8 = u32::from_le_bytes([sram5 as u8, sram6 as u8, sram7 as u8, sram8 as u8]);
+
+        self.driver_data_checksum += sram1 + sram2 + sram3 + sram4 + sram5 + sram6 + sram7 + sram8;
+        Ok(())
+    }
+
+    /// Parses an 'H' command, updates FRC periods, and updates the checksum.
+    fn handle_h_command(&mut self, content: &str) -> Result<(), CommandError> {
+        if content.len() < 19 { return Err(CommandError::TooShort); }
+        let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
+
+        let sram8 = parse_hex(3, 5)?;
+        let sram7 = parse_hex(5, 7)?;
+        let sram6 = parse_hex(7, 9)?;
+        let sram5 = parse_hex(9, 11)?;
+        let sram4 = parse_hex(11, 13)?;
+        let sram3 = parse_hex(13, 15)?;
+        let sram2 = parse_hex(15, 17)?;
+        let sram1 = parse_hex(17, 19)?;
+
+        self.frc_config.period_1_4 = u32::from_le_bytes([sram1 as u8, sram2 as u8, sram3 as u8, sram4 as u8]);
+        self.frc_config.period_5_8 = u32::from_le_bytes([sram5 as u8, sram6 as u8, sram7 as u8, sram8 as u8]);
 
         self.driver_data_checksum += sram1 + sram2 + sram3 + sram4 + sram5 + sram6 + sram7 + sram8;
         Ok(())
@@ -1094,6 +1121,27 @@ mod tests {
 
         assert_eq!(sim.frc_config.frequency_1_4, 0x05060708);
         assert_eq!(sim.frc_config.frequency_5_8, 0x01020304);
+
+        let end_response = sim.process_command("<C1F5003>").unwrap();
+        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+    }
+
+    #[test]
+    fn h_command_updates_frc_period() {
+        let mut sim = Simulator::new(0x1F);
+        sim.process_command("<C1F5002>").unwrap();
+
+        // Hxx<s8=11><s7=22><s6=33><s5=44><s4=55><s3=66><s2=77><s1=88>
+        let h_command = "<Hxx1122334455667788>";
+
+        let s1 = 0x88; let s2 = 0x77; let s3 = 0x66; let s4 = 0x55;
+        let s5 = 0x44; let s6 = 0x33; let s7 = 0x22; let s8 = 0x11;
+        let expected_checksum = s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8;
+
+        sim.process_command(h_command).unwrap();
+
+        assert_eq!(sim.frc_config.period_1_4, 0x55667788);
+        assert_eq!(sim.frc_config.period_5_8, 0x11223344);
 
         let end_response = sim.process_command("<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));

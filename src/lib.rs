@@ -66,6 +66,9 @@ pub struct Psu {
     // Power-on sequence configuration
     pub sequence_id: u8,
     pub sequence_delay: u32,
+    // Micro-stepping configuration
+    pub ustep_steps: u32,
+    pub ustep_delay: u32,
 }
 
 // Represents the state of an FPGA, including its pattern memory.
@@ -192,6 +195,8 @@ pub struct Simulator {
     pub alarm_values: [u32; 4],
     // System configuration
     pub system_config: SystemConfig,
+    // Micro-stepping global enable flag
+    pub ustep_enabled: bool,
     // Pattern Loop configuration
     pub pattern_loops: [PatternLoop; 8],
     // Main pattern clock configuration
@@ -223,6 +228,7 @@ impl Simulator {
             timer_values: [0; 4],
             alarm_values: [0; 4],
             system_config: Default::default(),
+            ustep_enabled: false,
             pattern_loops: Default::default(),
             main_clock_config: Default::default(),
             loop_enables: 0,
@@ -313,6 +319,7 @@ impl Simulator {
                 b'H' => { self.handle_h_command(content_bytes)?; return Ok(None); }
                 b'K' => { self.handle_k_command(content_bytes)?; return Ok(None); }
                 b'O' => { self.handle_o_command(content_bytes)?; return Ok(None); }
+                b'M' => { self.handle_m_command(content_bytes)?; return Ok(None); }
                 _ => {} // Fall through to 'C' command check
             }
         }
@@ -421,6 +428,32 @@ impl Simulator {
         }
 
         self.driver_data_checksum += sram1_high_v + sram2_low_v + sram3_cal_v + sram4_seq_id as u32 + sram5_delay + sram6_psu_num as u32;
+        Ok(())
+    }
+
+    /// Parses an 'M' command, updates PSU uStep config, and updates the checksum.
+    fn handle_m_command(&mut self, content_bytes: &[u8]) -> Result<(), CommandError> {
+        let content = std::str::from_utf8(content_bytes).map_err(|_| CommandError::InvalidParameter)?;
+        if content.len() < 20 { return Err(CommandError::TooShort); }
+        let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
+
+        let sram6_psu_num = parse_hex(3, 5)? as usize;
+        let sram5_steps = parse_hex(5, 8)?;
+        let sram4_enable = parse_hex(8, 9)?;
+        let sram3_delay = parse_hex(9, 13)?;
+        let sram2 = parse_hex(13, 16)?; // Unused for state
+        let sram1 = parse_hex(16, 19)?; // Unused for state
+        // SRAM7 at index 19 is parsed in C but not used in checksum.
+
+        self.ustep_enabled = sram4_enable == 1;
+
+        if sram6_psu_num > 0 && sram6_psu_num <= self.psus.len() {
+            let psu = &mut self.psus[sram6_psu_num - 1];
+            psu.ustep_steps = sram5_steps;
+            psu.ustep_delay = sram3_delay;
+        }
+
+        self.driver_data_checksum += sram1 + sram2 + sram3_delay + sram4_enable + sram5_steps + sram6_psu_num as u32;
         Ok(())
     }
 
@@ -1476,5 +1509,32 @@ mod tests {
 
         let end_response = sim.process_command(b"<C1F5001>").unwrap();
         assert_eq!(end_response, Some(format!("#{},3,#", checksum)));
+    }
+
+    #[test]
+    fn m_command_updates_ustep_config() {
+        let mut sim = Simulator::new(0x1F);
+        sim.process_command(b"<C1F5002>").unwrap(); // Start driver loading
+
+        // Mxx<psu=02><steps=064><enable=1><delay=00C8><s2=000><s1=000><s7=0>
+        let m_command = b"<Mxx02064100C80000000>";
+
+        let psu_num = 0x02;
+        let steps = 0x064;
+        let enable = 1;
+        let delay = 0x00C8;
+        let s2 = 0;
+        let s1 = 0;
+        let expected_checksum = psu_num + steps + enable + delay + s2 + s1;
+
+        sim.process_command(m_command).unwrap();
+
+        assert_eq!(sim.ustep_enabled, true);
+        let psu = &sim.psus[1]; // PSU #2 is at index 1
+        assert_eq!(psu.ustep_steps, 100);
+        assert_eq!(psu.ustep_delay, 200);
+
+        let end_response = sim.process_command(b"<C1F5003>").unwrap();
+        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
     }
 }

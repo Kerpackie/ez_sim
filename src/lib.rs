@@ -153,6 +153,8 @@ pub struct FrcConfig {
     pub frequency_5_8: u32,
     pub period_1_4: u32,
     pub period_5_8: u32,
+    pub source_1_4: u32,
+    pub source_5_8: u32,
 }
 
 // The main struct that holds the entire state of the simulated driver board.
@@ -311,6 +313,10 @@ impl Simulator {
                     }
                     'H' => {
                         self.handle_h_command(content)?;
+                        return Ok(None); // Data commands are silent
+                    }
+                    'K' => {
+                        self.handle_k_command(content)?;
                         return Ok(None); // Data commands are silent
                     }
                     _ => {} // Fall through to 'C' command check
@@ -723,6 +729,27 @@ impl Simulator {
 
         self.frc_config.period_1_4 = u32::from_le_bytes([sram1 as u8, sram2 as u8, sram3 as u8, sram4 as u8]);
         self.frc_config.period_5_8 = u32::from_le_bytes([sram5 as u8, sram6 as u8, sram7 as u8, sram8 as u8]);
+
+        self.driver_data_checksum += sram1 + sram2 + sram3 + sram4 + sram5 + sram6 + sram7 + sram8;
+        Ok(())
+    }
+
+    /// Parses a 'K' command, updates FRC sources, and updates the checksum.
+    fn handle_k_command(&mut self, content: &str) -> Result<(), CommandError> {
+        if content.len() < 11 { return Err(CommandError::TooShort); }
+        let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
+
+        let sram8 = parse_hex(3, 4)?;
+        let sram7 = parse_hex(4, 5)?;
+        let sram6 = parse_hex(5, 6)?;
+        let sram5 = parse_hex(6, 7)?;
+        let sram4 = parse_hex(7, 8)?;
+        let sram3 = parse_hex(8, 9)?;
+        let sram2 = parse_hex(9, 10)?;
+        let sram1 = parse_hex(10, 11)?;
+
+        self.frc_config.source_1_4 = u32::from_le_bytes([sram1 as u8, sram2 as u8, sram3 as u8, sram4 as u8]);
+        self.frc_config.source_5_8 = u32::from_le_bytes([sram5 as u8, sram6 as u8, sram7 as u8, sram8 as u8]);
 
         self.driver_data_checksum += sram1 + sram2 + sram3 + sram4 + sram5 + sram6 + sram7 + sram8;
         Ok(())
@@ -1142,6 +1169,27 @@ mod tests {
 
         assert_eq!(sim.frc_config.period_1_4, 0x55667788);
         assert_eq!(sim.frc_config.period_5_8, 0x11223344);
+
+        let end_response = sim.process_command("<C1F5003>").unwrap();
+        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+    }
+
+    #[test]
+    fn k_command_updates_frc_source() {
+        let mut sim = Simulator::new(0x1F);
+        sim.process_command("<C1F5002>").unwrap();
+
+        // Kxx<s8=1><s7=2><s6=3><s5=4><s4=5><s3=6><s2=7><s1=8>
+        let k_command = "<Kxx12345678>";
+
+        let s1 = 8; let s2 = 7; let s3 = 6; let s4 = 5;
+        let s5 = 4; let s6 = 3; let s7 = 2; let s8 = 1;
+        let expected_checksum = s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8;
+
+        sim.process_command(k_command).unwrap();
+
+        assert_eq!(sim.frc_config.source_1_4, 0x05060708);
+        assert_eq!(sim.frc_config.source_5_8, 0x01020304);
 
         let end_response = sim.process_command("<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));

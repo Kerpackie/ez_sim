@@ -128,6 +128,14 @@ pub struct SystemConfig {
     pub sigs_mod_sequence_off: u32,
 }
 
+// Represents the configuration for a single pattern loop.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct PatternLoop {
+    pub start_address: u32,
+    pub end_address: u32,
+    pub count: u32,
+}
+
 // The main struct that holds the entire state of the simulated driver board.
 #[derive(Debug, Clone)]
 pub struct Simulator {
@@ -146,6 +154,8 @@ pub struct Simulator {
     pub alarm_values: [u32; 4],
     // System configuration
     pub system_config: SystemConfig,
+    // Pattern Loop configuration
+    pub pattern_loops: [PatternLoop; 8],
     // --- Internal state for data loading sessions ---
     sram_address: u32,
     pattern_data_checksum: u32,
@@ -166,6 +176,7 @@ impl Simulator {
             timer_values: [0; 4],
             alarm_values: [0; 4],
             system_config: Default::default(),
+            pattern_loops: Default::default(),
             sram_address: 1,
             pattern_data_checksum: 0,
             driver_data_checksum: 0,
@@ -249,6 +260,10 @@ impl Simulator {
                     }
                     'J' => {
                         self.handle_j_command(content)?;
+                        return Ok(None); // Data commands are silent
+                    }
+                    'L' => {
+                        self.handle_l_command(content)?;
                         return Ok(None); // Data commands are silent
                     }
                     _ => {} // Fall through to 'C' command check
@@ -556,6 +571,28 @@ impl Simulator {
         self.driver_data_checksum += sram1 + sram2 + sram3 + sram4 + sram5 + sram6 + sram7 + sram8;
         Ok(())
     }
+
+    /// Parses an 'L' command, updates pattern loop state, and updates the checksum.
+    fn handle_l_command(&mut self, content: &str) -> Result<(), CommandError> {
+        if content.len() < 11 { return Err(CommandError::TooShort); }
+        let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
+
+        // This handles the older, shorter variant of the 'L' command.
+        let sram1_loop_num = parse_hex(3, 5)? as usize;
+        let sram4_count = parse_hex(5, 7)?;
+        let sram3_end_addr = parse_hex(7, 9)?;
+        let sram2_start_addr = parse_hex(9, 11)?;
+
+        if sram1_loop_num > 0 && sram1_loop_num <= self.pattern_loops.len() {
+            let p_loop = &mut self.pattern_loops[sram1_loop_num - 1];
+            p_loop.count = sram4_count;
+            p_loop.end_address = sram3_end_addr;
+            p_loop.start_address = sram2_start_addr;
+        }
+
+        self.driver_data_checksum += sram1_loop_num as u32 + sram2_start_addr + sram3_end_addr + sram4_count;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -855,6 +892,31 @@ mod tests {
         assert_eq!(config.seq_on_delay_2, 0);
         assert_eq!(config.seq_off_delay_1, 100);
         assert_eq!(config.seq_on_delay_1, 100);
+
+        let end_response = sim.process_command("<C1F5003>").unwrap();
+        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+    }
+
+    #[test]
+    fn l_command_updates_loop_config() {
+        let mut sim = Simulator::new(0x1F);
+        sim.process_command("<C1F5002>").unwrap();
+
+        // Lxx<loop=01><count=0A><end=FF><start=00>
+        let l_command = "<Lxx010AFF00>";
+
+        let s1 = 0x01; // loop num
+        let s2 = 0x00; // start
+        let s3 = 0xFF; // end
+        let s4 = 0x0A; // count
+        let expected_checksum = s1 + s2 + s3 + s4;
+
+        sim.process_command(l_command).unwrap();
+
+        let p_loop = &sim.pattern_loops[0]; // Loop #1 is at index 0
+        assert_eq!(p_loop.start_address, 0x00);
+        assert_eq!(p_loop.end_address, 0xFF);
+        assert_eq!(p_loop.count, 0x0A);
 
         let end_response = sim.process_command("<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));

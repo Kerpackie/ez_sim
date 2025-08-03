@@ -117,6 +117,15 @@ pub struct SystemConfig {
     pub clocks_restart_time: u32,
     pub clk32_mon_filter: u32,
     pub clk64_mon_filter: u32,
+    // Sequence delays
+    pub seq_on_delay_1: u32,
+    pub seq_off_delay_1: u32,
+    pub seq_on_delay_2: u32,
+    pub seq_off_delay_2: u32,
+    pub seq_on_delay_3: u32,
+    pub seq_off_delay_3: u32,
+    pub sigs_mod_sequence_on: u32,
+    pub sigs_mod_sequence_off: u32,
 }
 
 // The main struct that holds the entire state of the simulated driver board.
@@ -236,6 +245,10 @@ impl Simulator {
                     }
                     'F' => {
                         self.handle_f_command(content)?;
+                        return Ok(None); // Data commands are silent
+                    }
+                    'J' => {
+                        self.handle_j_command(content)?;
                         return Ok(None); // Data commands are silent
                     }
                     _ => {} // Fall through to 'C' command check
@@ -516,6 +529,33 @@ impl Simulator {
         });
         Ok(())
     }
+
+    /// Parses a 'J' command, updates sequence delays, and updates the checksum.
+    fn handle_j_command(&mut self, content: &str) -> Result<(), CommandError> {
+        if content.len() < 17 { return Err(CommandError::TooShort); }
+        let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
+
+        let sram1 = parse_hex(3, 4)?;
+        let sram2 = parse_hex(4, 5)?;
+        let sram3 = parse_hex(5, 7)?;
+        let sram4 = parse_hex(7, 9)?;
+        let sram5 = parse_hex(9, 11)?;
+        let sram6 = parse_hex(11, 13)?;
+        let sram7 = parse_hex(13, 15)?;
+        let sram8 = parse_hex(15, 17)?;
+
+        self.system_config.sigs_mod_sequence_on = sram1;
+        self.system_config.sigs_mod_sequence_off = sram2;
+        self.system_config.seq_off_delay_3 = sram3;
+        self.system_config.seq_on_delay_3 = sram4;
+        self.system_config.seq_off_delay_2 = sram5;
+        self.system_config.seq_on_delay_2 = sram6;
+        self.system_config.seq_off_delay_1 = sram7;
+        self.system_config.seq_on_delay_1 = sram8;
+
+        self.driver_data_checksum += sram1 + sram2 + sram3 + sram4 + sram5 + sram6 + sram7 + sram8;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -787,6 +827,34 @@ mod tests {
         assert_eq!(config.clocks_restart_time, 600); // 10 * 60
         assert_eq!(config.clk32_mon_filter, !0xFFFF);
         assert_eq!(config.clk64_mon_filter, !0xCDAB);
+
+        let end_response = sim.process_command("<C1F5003>").unwrap();
+        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+    }
+
+    #[test]
+    fn j_command_updates_sequence_delays() {
+        let mut sim = Simulator::new(0x1F);
+        sim.process_command("<C1F5002>").unwrap();
+
+        // Jxx<s1=1><s2=0><s3=64><s4=64><s5=00><s6=00><s7=64><s8=64>
+        let j_command = "<Jxx10646400006464>";
+
+        let s1 = 1; let s2 = 0; let s3 = 0x64; let s4 = 0x64;
+        let s5 = 0x00; let s6 = 0x00; let s7 = 0x64; let s8 = 0x64;
+        let expected_checksum = s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8;
+
+        sim.process_command(j_command).unwrap();
+
+        let config = &sim.system_config;
+        assert_eq!(config.sigs_mod_sequence_on, 1);
+        assert_eq!(config.sigs_mod_sequence_off, 0);
+        assert_eq!(config.seq_off_delay_3, 100);
+        assert_eq!(config.seq_on_delay_3, 100);
+        assert_eq!(config.seq_off_delay_2, 0);
+        assert_eq!(config.seq_on_delay_2, 0);
+        assert_eq!(config.seq_off_delay_1, 100);
+        assert_eq!(config.seq_on_delay_1, 100);
 
         let end_response = sim.process_command("<C1F5003>").unwrap();
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));

@@ -170,6 +170,20 @@ pub struct AmonTest {
     pub tp1_gain: f32,
     pub tp2_gain: f32,
     pub sum_gain: f32,
+    // Fields for 'B' command
+    pub tp1_peak_detect: u32,
+    pub tp2_peak_detect: u32,
+    pub tp1_samples: u32,
+    pub tp2_samples: u32,
+    pub board: u32,
+    pub tp1_discharge: u32,
+    pub tp2_discharge: u32,
+    pub tag: u32,
+    pub tp1_common_mux: u32,
+    pub tp2_common_mux: u32,
+    pub tp1_discharge_time: u32,
+    pub tp2_discharge_time: u32,
+    pub unit_type: u32,
 }
 
 // Represents the configuration for a single pattern loop.
@@ -355,6 +369,7 @@ impl Simulator {
                 b'Z' => { self.handle_z_command(content_bytes)?; return Ok(None); }
                 b'W' => { self.handle_w_command(content_bytes)?; return Ok(None); }
                 b'U' => { self.handle_u_command(content_bytes)?; return Ok(None); }
+                b'B' => { self.handle_b_command(content_bytes)?; return Ok(None); }
                 _ => {} // Fall through to 'C' command check
             }
         }
@@ -571,6 +586,63 @@ impl Simulator {
         }
 
         self.driver_data_checksum += sram1_tp1_gain + sram2_tp2_gain + sram3_sum_gain + sram4_test_count + sram8_test_num as u32;
+        Ok(())
+    }
+
+    /// Parses a 'B' command, updates detailed AMON test config, and updates the checksum.
+    fn handle_b_command(&mut self, content_bytes: &[u8]) -> Result<(), CommandError> {
+        let content = std::str::from_utf8(content_bytes).map_err(|_| CommandError::InvalidParameter)?;
+        if content.len() < 18 { return Err(CommandError::TooShort); }
+        let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
+
+        let cmd_type = parse_hex(3, 4)?;
+        let test_num = parse_hex(4, 6)? as usize;
+
+        if test_num == 0 || test_num > self.amon_tests.len() {
+            return Err(CommandError::InvalidParameter);
+        }
+        let test = &mut self.amon_tests[test_num - 1];
+        self.amon_test_count = test_num as u32;
+
+        let sram1 = parse_hex(8, 10)?;
+        let sram2 = parse_hex(10, 12)?;
+        let sram3 = parse_hex(12, 14)?;
+        let sram4 = parse_hex(14, 16)?;
+        let sram5 = parse_hex(16, 18)?;
+
+        match cmd_type {
+            1 => {
+                test.tp1_mux_ch = sram1;
+                test.tp1_peak_detect = sram2;
+                test.tp2_mux_ch = sram3;
+                test.tp2_peak_detect = sram4;
+                test.test_type = sram5;
+            }
+            2 => {
+                test.tp1_amon_mux_a = sram1;
+                test.tp1_samples = sram2;
+                test.tp2_amon_mux_a = sram3;
+                test.tp2_samples = sram4;
+                test.board = sram5;
+            }
+            3 => {
+                test.tp1_amon_mux_b = sram1;
+                test.tp1_discharge = sram2;
+                test.tp2_amon_mux_b = sram3;
+                test.tp2_discharge = sram4;
+                test.tag = sram5;
+            }
+            4 => {
+                test.tp1_common_mux = sram1;
+                test.tp1_discharge_time = sram2;
+                test.tp2_common_mux = sram3;
+                test.tp2_discharge_time = sram4;
+                test.unit_type = sram5;
+            }
+            _ => return Err(CommandError::InvalidParameter),
+        }
+
+        self.driver_data_checksum += sram1 + sram2 + sram3 + sram4 + sram5 + test_num as u32 + cmd_type;
         Ok(())
     }
 
@@ -1762,6 +1834,59 @@ mod tests {
         assert_eq!(test.sum_gain, 3.0);
 
         let end_response = sim.process_command(b"<C1F5003>").unwrap();
+        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+    }
+
+    #[test]
+    fn b_command_updates_amon_config() {
+        let mut sim = Simulator::new(0x1F);
+        sim.process_command(b"<C1F5002>").unwrap(); // Start driver loading
+
+        // Type 1: Mux and Test Type
+        let b_command1 = b"<Bxx101000A0B0C0D01>";
+        sim.process_command(b_command1).unwrap();
+        let test1 = &sim.amon_tests[0];
+        assert_eq!(test1.tp1_mux_ch, 0x0A);
+        assert_eq!(test1.tp1_peak_detect, 0x0B);
+        assert_eq!(test1.tp2_mux_ch, 0x0C);
+        assert_eq!(test1.tp2_peak_detect, 0x0D);
+        assert_eq!(test1.test_type, 0x01);
+
+        // Type 2: AMON Mux A and Samples
+        let b_command2 = b"<Bxx2020014321E6405>";
+        sim.process_command(b_command2).unwrap();
+        let test2 = &sim.amon_tests[1];
+        assert_eq!(test2.tp1_amon_mux_a, 0x14);
+        assert_eq!(test2.tp1_samples, 0x32);
+        assert_eq!(test2.tp2_amon_mux_a, 0x1E);
+        assert_eq!(test2.tp2_samples, 0x64);
+        assert_eq!(test2.board, 0x05);
+
+        // Type 3: AMON Mux B and Discharge
+        let b_command3 = b"<Bxx30300010203040F>";
+        sim.process_command(b_command3).unwrap();
+        let test3 = &sim.amon_tests[2];
+        assert_eq!(test3.tp1_amon_mux_b, 0x01);
+        assert_eq!(test3.tp1_discharge, 0x02);
+        assert_eq!(test3.tp2_amon_mux_b, 0x03);
+        assert_eq!(test3.tp2_discharge, 0x04);
+        assert_eq!(test3.tag, 0x0F);
+
+        // Type 4: Common Mux and Discharge Time
+        let b_command4 = b"<Bxx40400196421C80A>";
+        sim.process_command(b_command4).unwrap();
+        let test4 = &sim.amon_tests[3];
+        assert_eq!(test4.tp1_common_mux, 0x19);
+        assert_eq!(test4.tp1_discharge_time, 0x64);
+        assert_eq!(test4.tp2_common_mux, 0x21);
+        assert_eq!(test4.tp2_discharge_time, 0xC8);
+        assert_eq!(test4.unit_type, 0x0A);
+
+        let end_response = sim.process_command(b"<C1F5003>").unwrap();
+        let expected_checksum = (0x01 + 0x01 + 0x0A + 0x0B + 0x0C + 0x0D + 0x01) +
+            (0x02 + 0x02 + 0x14 + 0x32 + 0x1E + 0x64 + 0x05) +
+            (0x03 + 0x03 + 0x01 + 0x02 + 0x03 + 0x04 + 0x0F) +
+            (0x04 + 0x04 + 0x19 + 0x64 + 0x21 + 0xC8 + 0x0A);
         assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
     }
 }

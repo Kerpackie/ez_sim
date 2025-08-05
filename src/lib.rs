@@ -30,7 +30,9 @@ enum Command {
     ClearClockFail,
     /// Command 02: Clears sine wave failure flags.
     ClearSwFail,
+    /// Command 03: Starts the main power and signal sequence.
     SequenceOn,
+    /// Command 04: Stops the main power and signal sequence.
     SequenceOff,
     // Command 50 has several sub-modes for data loading.
     DataLoad(DataLoadMode),
@@ -130,6 +132,7 @@ pub struct SineWave {
 pub struct SystemConfig {
     pub auto_reset: bool,
     pub auto_reset_retries: u32,
+    pub auto_reset_counter: u32,
     pub stop_on_v_error: bool,
     pub stop_on_i_error: bool,
     pub stop_on_clk_error: bool,
@@ -145,6 +148,7 @@ pub struct SystemConfig {
     pub clocks_restart_time: u32,
     pub clk32_mon_filter: u32,
     pub clk64_mon_filter: u32,
+    pub ignore_clock_fails: bool,
     // Sequence delays
     pub seq_on_delay_1: u32,
     pub seq_off_delay_1: u32,
@@ -233,6 +237,8 @@ pub struct FrcConfig {
 pub struct Simulator {
     // The 2-character hexadecimal RS-485 address of the simulator.
     pub rs485_address: u8,
+    /// Represents the overall on/off status of the driver sequence.
+    pub sequence_on: bool,
     // An array of 6 PSUs, as suggested by the C code (PSU_1_DATA to PSU_6_DATA).
     pub psus: [Psu; 6],
     // Two FPGAs are mentioned in the C code (FPGA1_Present, FPGA2_Present).
@@ -277,6 +283,7 @@ impl Simulator {
     pub fn new(rs485_address: u8) -> Self {
         Self {
             rs485_address,
+            sequence_on: false,
             psus: Default::default(),
             fpgas: Default::default(),
             clock_generators: Default::default(),
@@ -431,11 +438,16 @@ impl Simulator {
                 String::from("#OK#")
             }
             Command::SequenceOn => {
-                // TODO: Implement logic to turn on PSUs, clocks, etc.
+                // In the C code, this command also clears DUTMON data, resets the auto-reset counter,
+                // and sets a flag to ignore clock fails to false.
+                self.amon_tests.iter_mut().for_each(|test| *test = AmonTest::default());
+                self.system_config.auto_reset_counter = 0;
+                self.system_config.ignore_clock_fails = false;
+                self.sequence_on = true;
                 String::from("#ON#")
             }
             Command::SequenceOff => {
-                // TODO: Implement logic to turn off all systems.
+                self.sequence_on = false;
                 String::from("#OFF#")
             }
             Command::DataLoad(mode) => match mode {
@@ -1325,10 +1337,16 @@ mod tests {
     #[test]
     fn process_sequence_on_off_commands() {
         let mut sim = Simulator::new(0x1F);
+        sim.system_config.auto_reset_counter = 5; // Set a pre-condition
+
         let response_on = sim.process_command(b"<C1F03>").unwrap();
         assert_eq!(response_on, Some(String::from("#ON#")));
+        assert_eq!(sim.sequence_on, true);
+        assert_eq!(sim.system_config.auto_reset_counter, 0); // Verify reset
+
         let response_off = sim.process_command(b"<C1F04>").unwrap();
         assert_eq!(response_off, Some(String::from("#OFF#")));
+        assert_eq!(sim.sequence_on, false);
     }
 
     #[test]

@@ -48,6 +48,10 @@ enum Command {
     GetFaultLog(u32),
     /// Command 21: Returns the firmware and FPGA version string.
     GetVersion,
+    /// Command 22: Returns the currently loaded Program ID.
+    GetProgramId,
+    /// Command 23: Returns the checksum of the Program ID.
+    GetProgramIdChecksum,
     /// Command 24: Returns the main VI monitoring string.
     GetViMonitorString,
     // Command 50 has several sub-modes for data loading.
@@ -465,6 +469,8 @@ impl Simulator {
                 Ok(Command::GetFaultLog(data))
             }
             21 => Ok(Command::GetVersion),
+            22 => Ok(Command::GetProgramId),
+            23 => Ok(Command::GetProgramIdChecksum),
             24 => Ok(Command::GetViMonitorString),
             50 => {
                 // Command 50 has a sub-mode parameter
@@ -674,6 +680,10 @@ impl Simulator {
                 }
             }
             Command::GetVersion => self.make_version_string(),
+            Command::GetProgramId => self.make_program_id_string(),
+            Command::GetProgramIdChecksum => {
+                format!("#{}#", self.prog_id_hint + self.prog_id_lint)
+            }
             Command::GetViMonitorString => self.make_vi_monitor_string(),
             Command::DataLoad(mode) => match mode {
                 DataLoadMode::StartPatternLoad => {
@@ -782,6 +792,11 @@ impl Simulator {
             (self.sine_waves[1].fpga_version as u32) + 100,
             100 // Placeholder for Analog module version
         )
+    }
+
+    /// Creates the program ID string.
+    fn make_program_id_string(&self) -> String {
+        format!("#{:05},{:05}#", self.prog_id_hint, self.prog_id_lint)
     }
 
     /// Creates the main VI monitoring string, mimicking `MakeVIMonitorString`.
@@ -1927,6 +1942,24 @@ mod tests {
         let response = sim.process_command(b"<C1F21>").unwrap().unwrap();
         let expected = "#101.46,105,106,101,102,103,104,107,108,100#";
         assert_eq!(response, expected);
+    }
+
+    #[test]
+    fn process_command_22_get_program_id() {
+        let mut sim = Simulator::new(0x1F);
+        sim.prog_id_hint = 12345;
+        sim.prog_id_lint = 54321;
+        let response = sim.process_command(b"<C1F22>").unwrap().unwrap();
+        assert_eq!(response, "#12345,54321#");
+    }
+
+    #[test]
+    fn process_command_23_get_program_id_checksum() {
+        let mut sim = Simulator::new(0x1F);
+        sim.prog_id_hint = 100;
+        sim.prog_id_lint = 200;
+        let response = sim.process_command(b"<C1F23>").unwrap().unwrap();
+        assert_eq!(response, "#300#");
     }
 
     #[test]

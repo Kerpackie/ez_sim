@@ -42,6 +42,8 @@ enum Command {
     MonitorVi,
     /// Command 18: Returns the hardware configuration string.
     GetConfiguration,
+    /// Command 19: Performs a self-test of the memory.
+    SelfTestMem { is_basic: bool },
     // Command 50 has several sub-modes for data loading.
     DataLoad(DataLoadMode),
     // ... other commands will be added here
@@ -413,6 +415,13 @@ impl Simulator {
             }
             17 => Ok(Command::MonitorVi),
             18 => Ok(Command::GetConfiguration),
+            19 => {
+                if content.len() < 19 {
+                    return Err(CommandError::TooShort);
+                }
+                let data = content[14..19].trim().parse::<u32>().map_err(|_| CommandError::InvalidParameter)?;
+                Ok(Command::SelfTestMem { is_basic: data != 0 })
+            }
             50 => {
                 // Command 50 has a sub-mode parameter
                 if content.len() < 7 {
@@ -597,6 +606,21 @@ impl Simulator {
                 self.make_ref_monitor_string()
             }
             Command::GetConfiguration => self.make_configuration_string(),
+            Command::SelfTestMem { is_basic } => {
+                self.prog_id_hint = 0;
+                self.prog_id_lint = 0;
+
+                // Simulate the test by setting the status flags to OK.
+                for fpga in self.fpgas.iter_mut() {
+                    fpga.mem_a_test_ok = true;
+                    fpga.mem_b_test_ok = true;
+                    fpga.ctrl_a_test_ok = true;
+                    fpga.ctrl_b_test_ok = true;
+                }
+                // The C code prints to the console but doesn't have a specific return
+                // value via UARTSend. We'll return a simple OK to acknowledge.
+                String::from("#OK#")
+            }
             Command::DataLoad(mode) => match mode {
                 DataLoadMode::StartPatternLoad => {
                     self.is_pattern_data_loading = true;
@@ -1728,6 +1752,23 @@ mod tests {
         let response = sim.process_command(b"<C1F18>").unwrap().unwrap();
         let expected = "#10A,11F,1ABC,1,0,101,102,103,104,105,106,1,1,0,0,0,100,1,12B,0,100,0,100,1,13C,0,100,1,14D,1,0,0,0,1,0#";
         assert_eq!(response, expected);
+    }
+
+    #[test]
+    fn process_command_19_self_test_mem() {
+        let mut sim = Simulator::new(0x1F);
+        sim.fpgas[0].mem_a_test_ok = false; // Pre-fail the test
+        sim.prog_id_hint = 123;
+        sim.prog_id_lint = 456;
+
+        // Command for full memory test (nDATA = 0)
+        let response = sim.process_command(b"<C1F19000000000000000>").unwrap();
+        assert_eq!(response, Some(String::from("#OK#")));
+
+        // Verify state changes
+        assert_eq!(sim.prog_id_hint, 0);
+        assert_eq!(sim.prog_id_lint, 0);
+        assert_eq!(sim.fpgas[0].mem_a_test_ok, true); // Should be set to true (pass)
     }
 
     #[test]

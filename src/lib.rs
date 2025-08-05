@@ -44,6 +44,10 @@ enum Command {
     GetConfiguration,
     /// Command 19: Performs a self-test of the memory.
     SelfTestMem { is_basic: bool },
+    /// Command 20: Retrieves a historical fault log by index.
+    GetFaultLog(u32),
+    /// Command 21: Returns the firmware and FPGA version string.
+    GetVersion,
     // Command 50 has several sub-modes for data loading.
     DataLoad(DataLoadMode),
     // ... other commands will be added here
@@ -119,6 +123,7 @@ impl Default for Psu {
 pub struct Fpga {
     pub present: bool,
     pub position: u8,
+    pub version: u8,
     pub mem_a_test_ok: bool,
     pub mem_b_test_ok: bool,
     pub ctrl_a_test_ok: bool,
@@ -135,6 +140,7 @@ impl Default for Fpga {
         Self {
             present: false,
             position: 0,
+            version: 0,
             mem_a_test_ok: true,
             mem_b_test_ok: true,
             ctrl_a_test_ok: true,
@@ -173,6 +179,7 @@ pub struct SineWave {
     pub duty_cycle: u32,
     pub reset_value: u32,
     pub module_type: u8,
+    pub fpga_version: u8,
     pub programmed: bool,
     /// Represents if a sine wave has a failure condition.
     pub has_failure: bool,
@@ -285,11 +292,31 @@ pub struct FrcConfig {
     pub source_5_8: u32,
 }
 
+/// Represents a snapshot of the system state at the time of a fault.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct FaultLog {
+    pub monitor_voltages: [f32; 6],
+    pub monitor_currents: [f32; 6],
+    pub auto_reset_counter: u32,
+    pub over_current_flags: u8,
+    pub under_voltage_flags: u8,
+    pub over_voltage_flags: u8,
+    pub clock_status_1_32: u32,
+    pub clock_status_33_64: u32,
+    pub sw_fault_status: u32,
+    pub sw1_rms: f32,
+    pub sw2_rms: f32,
+    pub driver_on: bool,
+    pub timer_values: [u32; 4],
+    pub alarm_values: [u32; 4],
+}
+
 // The main struct that holds the entire state of the simulated driver board.
 #[derive(Debug, Clone)]
 pub struct Simulator {
     // The 2-character hexadecimal RS-485 address of the simulator.
     pub rs485_address: u8,
+    pub fw_version: f32,
     /// Represents the overall on/off status of the driver sequence.
     pub sequence_on: bool,
     /// High and low integers for the program ID.
@@ -336,6 +363,8 @@ pub struct Simulator {
     pub bp_res1_present: bool,
     pub bp_res2_present: bool,
     pub door_open: bool,
+    // Historical fault logs
+    pub fault_logs: Vec<FaultLog>,
     // --- Internal state for data loading sessions ---
     sram_address: u32,
     pattern_data_checksum: u32,
@@ -349,6 +378,7 @@ impl Simulator {
     pub fn new(rs485_address: u8) -> Self {
         Self {
             rs485_address,
+            fw_version: 1.46,
             sequence_on: false,
             prog_id_hint: 0,
             prog_id_lint: 0,
@@ -378,6 +408,7 @@ impl Simulator {
             bp_res1_present: true,
             bp_res2_present: true,
             door_open: true, // Corresponds to 1 (closed) in C code
+            fault_logs: vec![FaultLog::default(); 10], // C firmware stores 10 logs
             sram_address: 1,
             pattern_data_checksum: 0,
             driver_data_checksum: 0,
@@ -422,6 +453,14 @@ impl Simulator {
                 let data = content[14..19].trim().parse::<u32>().map_err(|_| CommandError::InvalidParameter)?;
                 Ok(Command::SelfTestMem { is_basic: data != 0 })
             }
+            20 => {
+                if content.len() < 19 {
+                    return Err(CommandError::TooShort);
+                }
+                let data = content[14..19].trim().parse::<u32>().map_err(|_| CommandError::InvalidParameter)?;
+                Ok(Command::GetFaultLog(data))
+            }
+            21 => Ok(Command::GetVersion),
             50 => {
                 // Command 50 has a sub-mode parameter
                 if content.len() < 7 {
@@ -606,7 +645,7 @@ impl Simulator {
                 self.make_ref_monitor_string()
             }
             Command::GetConfiguration => self.make_configuration_string(),
-            Command::SelfTestMem { is_basic } => {
+            Command::SelfTestMem { is_basic: _ } => {
                 self.prog_id_hint = 0;
                 self.prog_id_lint = 0;
 
@@ -621,6 +660,15 @@ impl Simulator {
                 // value via UARTSend. We'll return a simple OK to acknowledge.
                 String::from("#OK#")
             }
+            Command::GetFaultLog(index) => {
+                if let Some(log) = self.fault_logs.get(index as usize) {
+                    self.make_vi_fault_string(log)
+                } else {
+                    // If the index is out of bounds, return an empty but validly formatted string.
+                    self.make_vi_fault_string(&FaultLog::default())
+                }
+            }
+            Command::GetVersion => self.make_version_string(),
             Command::DataLoad(mode) => match mode {
                 DataLoadMode::StartPatternLoad => {
                     self.is_pattern_data_loading = true;
@@ -647,14 +695,6 @@ impl Simulator {
         }
     }
 
-    /// Simulates the `MonitorVI` C function, updating internal state.
-    fn monitor_vi(&mut self) {
-        // This function would normally trigger simulated hardware reads.
-        // For now, we can just ensure calculated values are up-to-date.
-        // For example, if PSU voltage is outside limits, we could set a flag here.
-        // The string generation functions will then read these flags.
-    }
-
     /// Creates the reference monitoring string, mimicking `MakeRefMonitorString`.
     fn make_ref_monitor_string(&self) -> String {
         format!(
@@ -677,60 +717,6 @@ impl Simulator {
             self.alarm_values[3] + 1000,
             if self.door_open { 0 } else { 1 } // C code: 0=Open, 1=Close
         )
-    }
-
-    /// Creates the main VI monitoring string, mimicking `MakeVIMonitorString`.
-    fn make_vi_monitor_string(&self) -> String {
-        let mut response = String::from("#");
-
-        // PSU Voltages and Currents
-        for psu in &self.psus {
-            // The C code has a quirk where voltages > 899 are formatted differently.
-            let v_str = if psu.voltage_setpoint > 899.0 {
-                format!("{:.1},", (psu.voltage_setpoint / 10.0) + 1000.0)
-            } else {
-                format!("{:.2},", psu.voltage_setpoint + 100.0)
-            };
-            response.push_str(&v_str);
-            response.push_str(&format!("{:.2},", psu.current_limit + 100.0));
-        }
-
-        // Auto-reset counter
-        response.push_str(&format!("{},", self.system_config.auto_reset_counter + 1000));
-
-        // PSU Fault Status (3 parts: OverCurrent, UnderVoltage, OverVoltage)
-        let mut fault_flags = String::new();
-        for psu in &self.psus { fault_flags.push(if psu.current_limit > psu.current_monitor_limit {'1'} else {'0'}); }
-        for psu in &self.psus { fault_flags.push(if psu.voltage_setpoint < psu.low_voltage_limit {'1'} else {'0'}); }
-        for psu in &self.psus { fault_flags.push(if psu.voltage_setpoint > psu.high_voltage_limit {'1'} else {'0'}); }
-        response.push_str(&fault_flags);
-
-        // Clock Status (placeholder values for now)
-        let clock_status_1_32 = 0u32;
-        let clock_status_33_64 = 0u32;
-        response.push_str(&format!(",{:X},", (clock_status_1_32 >> 16) + 0x10000));
-        response.push_str(&format!("{:X},", (clock_status_1_32 & 0xFFFF) + 0x10000));
-        response.push_str(&format!("{:X},", (clock_status_33_64 >> 16) + 0x10000));
-        response.push_str(&format!("{:X},", (clock_status_33_64 & 0xFFFF) + 0x10000));
-
-        // Sine Wave Status
-        let sw_status = (if self.sine_waves[0].has_failure {1} else {0}) + (if self.sine_waves[1].has_failure {2} else {0});
-        response.push_str(&format!("{:X},", sw_status + 0x100));
-        response.push_str(&format!("{:.2},", self.sine_waves[0].rms_value + 100.0));
-        response.push_str(&format!("{:.2},", self.sine_waves[1].rms_value + 100.0));
-
-        // Driver Status
-        response.push_str(&format!("{},", if self.sequence_on { 1 } else { 0 }));
-
-        // Timers and Alarms
-        for val in &self.timer_values { response.push_str(&format!("{},", val + 1000)); }
-        for val in &self.alarm_values { response.push_str(&format!("{},", val + 1000)); }
-
-        // Door Status (last item, no trailing comma)
-        response.push_str(&format!("{}", if self.door_open { 0 } else { 1 }));
-
-        response.push('#');
-        response
     }
 
     /// Creates the hardware configuration string, mimicking `MakeConfigurationString`.
@@ -773,6 +759,72 @@ impl Simulator {
             if self.sine_waves[0].programmed { 1 } else { 0 },
             if self.sine_waves[1].programmed { 1 } else { 0 }
         )
+    }
+
+    /// Creates the version information string, mimicking `MakeVersionString`.
+    fn make_version_string(&self) -> String {
+        format!(
+            "#{:.2},{},{},{},{},{},{},{},{},{}#",
+            self.fw_version + 100.0,
+            (self.fpgas[0].version as u32) + 100,
+            (self.fpgas[1].version as u32) + 100,
+            (self.clock_generators[0].fpga_version as u32) + 100,
+            (self.clock_generators[1].fpga_version as u32) + 100,
+            (self.clock_generators[2].fpga_version as u32) + 100,
+            (self.clock_generators[3].fpga_version as u32) + 100,
+            (self.sine_waves[0].fpga_version as u32) + 100,
+            (self.sine_waves[1].fpga_version as u32) + 100,
+            100 // Placeholder for Analog module version
+        )
+    }
+
+    /// Creates the fault log string, mimicking `MakeVIFaultString`.
+    fn make_vi_fault_string(&self, log: &FaultLog) -> String {
+        let mut response = String::from("#");
+
+        // PSU Voltages and Currents
+        for i in 0..6 {
+            let v_str = if log.monitor_voltages[i] > 899.0 {
+                format!("{:.1},", (log.monitor_voltages[i] / 10.0) + 1000.0)
+            } else {
+                format!("{:.2},", log.monitor_voltages[i] + 100.0)
+            };
+            response.push_str(&v_str);
+            response.push_str(&format!("{:.2},", log.monitor_currents[i] + 100.0));
+        }
+
+        // Auto-reset counter
+        response.push_str(&format!("{},", log.auto_reset_counter + 1000));
+
+        // PSU Fault Status
+        let mut fault_flags = String::new();
+        for i in 0..6 { fault_flags.push(if (log.over_current_flags >> i) & 1 == 1 {'1'} else {'0'}); }
+        for i in 0..6 { fault_flags.push(if (log.under_voltage_flags >> i) & 1 == 1 {'1'} else {'0'}); }
+        for i in 0..6 { fault_flags.push(if (log.over_voltage_flags >> i) & 1 == 1 {'1'} else {'0'}); }
+        response.push_str(&fault_flags);
+
+        // Clock Status
+        response.push_str(&format!(",{:X},", (log.clock_status_1_32 >> 16) + 0x10000));
+        response.push_str(&format!("{:X},", (log.clock_status_1_32 & 0xFFFF) + 0x10000));
+        response.push_str(&format!("{:X},", (log.clock_status_33_64 >> 16) + 0x10000));
+        response.push_str(&format!("{:X},", (log.clock_status_33_64 & 0xFFFF) + 0x10000));
+
+        // Sine Wave Status
+        response.push_str(&format!("{:X},", log.sw_fault_status + 0x100));
+        response.push_str(&format!("{:.2},", log.sw1_rms + 100.0));
+        response.push_str(&format!("{:.2},", log.sw2_rms + 100.0));
+
+        // Driver Status
+        response.push_str(&format!("{},", if log.driver_on { 1 } else { 0 }));
+
+        // Timers and Alarms
+        for val in &log.timer_values { response.push_str(&format!("{},", val + 1000)); }
+        for val in &log.alarm_values { response.push_str(&format!("{},", val + 1000)); }
+
+        // Door Status (last item, no trailing comma) - Note: C code doesn't include door status in fault log string
+        response.pop(); // Remove last comma
+        response.push('#');
+        response
     }
 
     /// Parses a 'V' command and updates the driver data checksum.
@@ -1762,13 +1814,57 @@ mod tests {
         sim.prog_id_lint = 456;
 
         // Command for full memory test (nDATA = 0)
-        let response = sim.process_command(b"<C1F19000000000000000>").unwrap();
+        let response = sim.process_command(b"<C1F190000000000000000>").unwrap();
         assert_eq!(response, Some(String::from("#OK#")));
 
         // Verify state changes
         assert_eq!(sim.prog_id_hint, 0);
         assert_eq!(sim.prog_id_lint, 0);
         assert_eq!(sim.fpgas[0].mem_a_test_ok, true); // Should be set to true (pass)
+    }
+
+    #[test]
+    fn process_command_20_get_fault_log() {
+        let mut sim = Simulator::new(0x1F);
+        // Pre-populate a fault log entry
+        sim.fault_logs[2] = FaultLog {
+            monitor_voltages: [1.1, 2.2, 3.3, 4.4, 5.5, 6.6],
+            monitor_currents: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+            auto_reset_counter: 3,
+            over_current_flags: 0b000001,  // PSU 1
+            under_voltage_flags: 0b000010, // PSU 2
+            over_voltage_flags: 0b000100,  // PSU 3
+            clock_status_1_32: 0xABCD1234,
+            clock_status_33_64: 0x5678EF90,
+            sw_fault_status: 1, // SW1 fault
+            sw1_rms: 1.23,
+            sw2_rms: 4.56,
+            driver_on: true,
+            timer_values: [10, 20, 30, 40],
+            alarm_values: [50, 60, 70, 80],
+        };
+
+        let response = sim.process_command(b"<C1F200000000000000002>").unwrap();
+        let expected = "#101.10,100.10,102.20,100.20,103.30,100.30,104.40,100.40,105.50,100.50,106.60,100.60,1003,1000000100000010000,1ABCD,11234,15678,1EF90,101,101.23,104.56,1,1010,1020,1030,1040,1050,1060,1070,1080#";
+        assert_eq!(response, Some(expected.to_string()));
+    }
+
+    #[test]
+    fn process_command_21_get_version() {
+        let mut sim = Simulator::new(0x1F);
+        sim.fw_version = 1.46;
+        sim.fpgas[0].version = 5;
+        sim.fpgas[1].version = 6;
+        sim.clock_generators[0].fpga_version = 1;
+        sim.clock_generators[1].fpga_version = 2;
+        sim.clock_generators[2].fpga_version = 3;
+        sim.clock_generators[3].fpga_version = 4;
+        sim.sine_waves[0].fpga_version = 7;
+        sim.sine_waves[1].fpga_version = 8;
+
+        let response = sim.process_command(b"<C1F21>").unwrap().unwrap();
+        let expected = "#101.46,105,106,101,102,103,104,107,108,100#";
+        assert_eq!(response, expected);
     }
 
     #[test]

@@ -26,6 +26,8 @@ pub enum CommandError {
 // Represents all possible numeric commands from the C firmware.
 #[derive(Debug, PartialEq)]
 enum Command {
+    /// Command 01: Clears clock failure flags.
+    ClearClockFail,
     SequenceOn,
     SequenceOff,
     // Command 50 has several sub-modes for data loading.
@@ -103,6 +105,8 @@ pub struct ClockGenerator {
     pub present: bool,
     pub enabled: bool,
     pub frequency: u32,
+    /// Represents if a clock has a failure condition.
+    pub has_failure: bool,
 }
 
 // Represents the state of a Sine Wave generator module.
@@ -302,6 +306,7 @@ impl Simulator {
         let cmd_id = u8::from_str_radix(cmd_id_str, 10).map_err(CommandError::InvalidCommandId)?;
 
         match cmd_id {
+            1 => Ok(Command::ClearClockFail),
             3 => Ok(Command::SequenceOn),
             4 => Ok(Command::SequenceOff),
             50 => {
@@ -408,6 +413,12 @@ impl Simulator {
     /// Executes a parsed command and returns the response string.
     fn execute_command(&mut self, command: Command) -> String {
         match command {
+            Command::ClearClockFail => {
+                for gen in self.clock_generators.iter_mut() {
+                    gen.has_failure = false;
+                }
+                String::from("#OK#")
+            }
             Command::SequenceOn => {
                 // TODO: Implement logic to turn on PSUs, clocks, etc.
                 String::from("#ON#")
@@ -1248,6 +1259,23 @@ mod tests {
     }
 
     // --- Tests for specific command logic ---
+
+    #[test]
+    fn process_command_clear_clock_fail() {
+        let mut sim = Simulator::new(0x1F);
+        // Set a failure state first
+        sim.clock_generators[0].has_failure = true;
+        sim.clock_generators[2].has_failure = true;
+
+        // Process the command
+        let response = sim.process_command(b"<C1F01>").unwrap();
+        assert_eq!(response, Some(String::from("#OK#")));
+
+        // Verify the state was changed
+        assert_eq!(sim.clock_generators[0].has_failure, false);
+        assert_eq!(sim.clock_generators[1].has_failure, false); // Should remain false
+        assert_eq!(sim.clock_generators[2].has_failure, false);
+    }
 
     #[test]
     fn process_command_50_pattern_load_cycle() {

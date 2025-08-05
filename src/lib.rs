@@ -301,8 +301,10 @@ pub struct FaultLog {
     pub over_current_flags: u8,
     pub under_voltage_flags: u8,
     pub over_voltage_flags: u8,
-    pub clock_status_1_32: u32,
-    pub clock_status_33_64: u32,
+    pub clock_status_1_16: u16,
+    pub clock_status_17_32: u16,
+    pub clock_status_33_48: u16,
+    pub clock_status_49_64: u16,
     pub sw_fault_status: u32,
     pub sw1_rms: f32,
     pub sw2_rms: f32,
@@ -804,10 +806,10 @@ impl Simulator {
         response.push_str(&fault_flags);
 
         // Clock Status
-        response.push_str(&format!(",{:X},", (log.clock_status_1_32 >> 16) + 0x10000));
-        response.push_str(&format!("{:X},", (log.clock_status_1_32 & 0xFFFF) + 0x10000));
-        response.push_str(&format!("{:X},", (log.clock_status_33_64 >> 16) + 0x10000));
-        response.push_str(&format!("{:X},", (log.clock_status_33_64 & 0xFFFF) + 0x10000));
+        response.push_str(&format!(",{:X},", (log.clock_status_17_32 as u32) + 0x10000));
+        response.push_str(&format!("{:X},", (log.clock_status_1_16 as u32) + 0x10000));
+        response.push_str(&format!("{:X},", (log.clock_status_49_64 as u32) + 0x10000));
+        response.push_str(&format!("{:X},", (log.clock_status_33_48 as u32) + 0x10000));
 
         // Sine Wave Status
         response.push_str(&format!("{:X},", log.sw_fault_status + 0x100));
@@ -1834,8 +1836,10 @@ mod tests {
             over_current_flags: 0b000001,  // PSU 1
             under_voltage_flags: 0b000010, // PSU 2
             over_voltage_flags: 0b000100,  // PSU 3
-            clock_status_1_32: 0xABCD1234,
-            clock_status_33_64: 0x5678EF90,
+            clock_status_1_16: 0x1234,
+            clock_status_17_32: 0xABCD,
+            clock_status_33_48: 0xEF90,
+            clock_status_49_64: 0x5678,
             sw_fault_status: 1, // SW1 fault
             sw1_rms: 1.23,
             sw2_rms: 4.56,
@@ -1844,8 +1848,8 @@ mod tests {
             alarm_values: [50, 60, 70, 80],
         };
 
-        let response = sim.process_command(b"<C1F200000000000000002>").unwrap();
-        let expected = "#101.10,100.10,102.20,100.20,103.30,100.30,104.40,100.40,105.50,100.50,106.60,100.60,1003,1000000100000010000,1ABCD,11234,15678,1EF90,101,101.23,104.56,1,1010,1020,1030,1040,1050,1060,1070,1080#";
+        let response = sim.process_command(b"<C1F2000000000000002>").unwrap();
+        let expected = "#101.10,100.10,102.20,100.20,103.30,100.30,104.40,100.40,105.50,100.50,106.60,100.60,1003,100000010000001000,1ABCD,11234,15678,1EF90,101,101.23,104.56,1,1010,1020,1030,1040,1050,1060,1070,1080#";
         assert_eq!(response, Some(expected.to_string()));
     }
 

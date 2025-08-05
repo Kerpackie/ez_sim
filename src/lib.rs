@@ -48,6 +48,8 @@ enum Command {
     GetFaultLog(u32),
     /// Command 21: Returns the firmware and FPGA version string.
     GetVersion,
+    /// Command 24: Returns the main VI monitoring string.
+    GetViMonitorString,
     // Command 50 has several sub-modes for data loading.
     DataLoad(DataLoadMode),
     // ... other commands will be added here
@@ -463,6 +465,7 @@ impl Simulator {
                 Ok(Command::GetFaultLog(data))
             }
             21 => Ok(Command::GetVersion),
+            24 => Ok(Command::GetViMonitorString),
             50 => {
                 // Command 50 has a sub-mode parameter
                 if content.len() < 7 {
@@ -671,6 +674,7 @@ impl Simulator {
                 }
             }
             Command::GetVersion => self.make_version_string(),
+            Command::GetViMonitorString => self.make_vi_monitor_string(),
             Command::DataLoad(mode) => match mode {
                 DataLoadMode::StartPatternLoad => {
                     self.is_pattern_data_loading = true;
@@ -778,6 +782,60 @@ impl Simulator {
             (self.sine_waves[1].fpga_version as u32) + 100,
             100 // Placeholder for Analog module version
         )
+    }
+
+    /// Creates the main VI monitoring string, mimicking `MakeVIMonitorString`.
+    fn make_vi_monitor_string(&self) -> String {
+        let mut response = String::from("#");
+
+        // PSU Voltages and Currents
+        for psu in &self.psus {
+            // The C code has a quirk where voltages > 899 are formatted differently.
+            let v_str = if psu.voltage_setpoint > 899.0 {
+                format!("{:.1},", (psu.voltage_setpoint / 10.0) + 1000.0)
+            } else {
+                format!("{:.2},", psu.voltage_setpoint + 100.0)
+            };
+            response.push_str(&v_str);
+            response.push_str(&format!("{:.2},", psu.current_limit + 100.0));
+        }
+
+        // Auto-reset counter
+        response.push_str(&format!("{},", self.system_config.auto_reset_counter + 1000));
+
+        // PSU Fault Status (3 parts: OverCurrent, UnderVoltage, OverVoltage)
+        let mut fault_flags = String::new();
+        for psu in &self.psus { fault_flags.push(if psu.current_limit > psu.current_monitor_limit {'1'} else {'0'}); }
+        for psu in &self.psus { fault_flags.push(if psu.voltage_setpoint < psu.low_voltage_limit {'1'} else {'0'}); }
+        for psu in &self.psus { fault_flags.push(if psu.voltage_setpoint > psu.high_voltage_limit {'1'} else {'0'}); }
+        response.push_str(&fault_flags);
+
+        // Clock Status (placeholder values for now)
+        let clock_status_1_32 = 0u32;
+        let clock_status_33_64 = 0u32;
+        response.push_str(&format!(",{:X},", (clock_status_1_32 >> 16) + 0x10000));
+        response.push_str(&format!("{:X},", (clock_status_1_32 & 0xFFFF) + 0x10000));
+        response.push_str(&format!("{:X},", (clock_status_33_64 >> 16) + 0x10000));
+        response.push_str(&format!("{:X},", (clock_status_33_64 & 0xFFFF) + 0x10000));
+
+        // Sine Wave Status
+        let sw_status = (if self.sine_waves[0].has_failure {1} else {0}) + (if self.sine_waves[1].has_failure {2} else {0});
+        response.push_str(&format!("{:X},", sw_status + 0x100));
+        response.push_str(&format!("{:.2},", self.sine_waves[0].rms_value + 100.0));
+        response.push_str(&format!("{:.2},", self.sine_waves[1].rms_value + 100.0));
+
+        // Driver Status
+        response.push_str(&format!("{},", if self.sequence_on { 1 } else { 0 }));
+
+        // Timers and Alarms
+        for val in &self.timer_values { response.push_str(&format!("{},", val + 1000)); }
+        for val in &self.alarm_values { response.push_str(&format!("{},", val + 1000)); }
+
+        // Door Status (last item, no trailing comma)
+        response.push_str(&format!("{}", if self.door_open { 0 } else { 1 }));
+
+        response.push('#');
+        response
     }
 
     /// Creates the fault log string, mimicking `MakeVIFaultString`.
@@ -1869,6 +1927,23 @@ mod tests {
         let response = sim.process_command(b"<C1F21>").unwrap().unwrap();
         let expected = "#101.46,105,106,101,102,103,104,107,108,100#";
         assert_eq!(response, expected);
+    }
+
+    #[test]
+    fn process_command_24_get_vi_monitor_string() {
+        let mut sim = Simulator::new(0x1F);
+        sim.psus[0].voltage_setpoint = 1.23;
+        sim.psus[0].current_limit = 0.45;
+        sim.psus[5].voltage_setpoint = 900.5; // Test high voltage formatting
+        sim.psus[5].current_limit = 6.78;
+        sim.sine_waves[0].rms_value = 1.11;
+        sim.sine_waves[1].rms_value = 2.22;
+        sim.sequence_on = true;
+        sim.door_open = false;
+
+        let response = sim.process_command(b"<C1F24>").unwrap().unwrap();
+        let expected_vi = "#101.23,100.45,100.00,100.00,100.00,100.00,100.00,100.00,100.00,100.00,1090.1,106.78,1000,000001000000100001,10000,10000,10000,10000,100,101.11,102.22,1,1000,1000,1000,1000,1000,1000,1000,1000,1#";
+        assert_eq!(response, expected_vi);
     }
 
     #[test]

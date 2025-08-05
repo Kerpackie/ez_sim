@@ -36,6 +36,8 @@ enum Command {
     SequenceOff,
     /// Command 05: Starts the power sequence for calibration.
     SequenceOnCal(u32),
+    /// Command 09: Sets the program ID and optionally clears memory.
+    SetProgramId { address: u32, data: u32 },
     // Command 50 has several sub-modes for data loading.
     DataLoad(DataLoadMode),
     // ... other commands will be added here
@@ -241,6 +243,9 @@ pub struct Simulator {
     pub rs485_address: u8,
     /// Represents the overall on/off status of the driver sequence.
     pub sequence_on: bool,
+    /// High and low integers for the program ID.
+    pub prog_id_hint: u32,
+    pub prog_id_lint: u32,
     // An array of 6 PSUs, as suggested by the C code (PSU_1_DATA to PSU_6_DATA).
     pub psus: [Psu; 6],
     // Two FPGAs are mentioned in the C code (FPGA1_Present, FPGA2_Present).
@@ -286,6 +291,8 @@ impl Simulator {
         Self {
             rs485_address,
             sequence_on: false,
+            prog_id_hint: 0,
+            prog_id_lint: 0,
             psus: Default::default(),
             fpgas: Default::default(),
             clock_generators: Default::default(),
@@ -330,6 +337,14 @@ impl Simulator {
                 let data_str = &content[14..19];
                 let data = data_str.trim().parse::<u32>().map_err(|_| CommandError::InvalidParameter)?;
                 Ok(Command::SequenceOnCal(data))
+            }
+            9 => {
+                if content.len() < 19 {
+                    return Err(CommandError::TooShort);
+                }
+                let address = content[9..14].trim().parse::<u32>().map_err(|_| CommandError::InvalidParameter)?;
+                let data = content[14..19].trim().parse::<u32>().map_err(|_| CommandError::InvalidParameter)?;
+                Ok(Command::SetProgramId { address, data })
             }
             50 => {
                 // Command 50 has a sub-mode parameter
@@ -489,6 +504,26 @@ impl Simulator {
                 self.sequence_on = true;
                 self.system_config.auto_reset_counter = 0;
                 String::from("#ON#")
+            }
+            Command::SetProgramId { address, data } => {
+                self.prog_id_hint = address;
+                self.prog_id_lint = data;
+
+                if address == 0 && data == 0 {
+                    self.system_config.clocks_required = false;
+                    self.amon_test_count = 0;
+                    self.amon_tests.iter_mut().for_each(|t| *t = AmonTest::default());
+
+                    if self.fpgas[0].present {
+                        self.fpgas[0].pattern_memory_a.fill(0);
+                        self.fpgas[0].pattern_memory_b.fill(0);
+                        self.fpgas[0].tristate_memory_a.fill(0);
+                    }
+                    if self.fpgas[1].present {
+                        self.fpgas[1].tristate_memory_b.fill(0);
+                    }
+                }
+                String::from("#OK#")
             }
             Command::DataLoad(mode) => match mode {
                 DataLoadMode::StartPatternLoad => {
@@ -1415,6 +1450,37 @@ mod tests {
         assert_eq!(sim.psus[4].voltage_setpoint, 500.0);
         assert_eq!(sim.psus[5].voltage_setpoint, 500.0); // PSU6 takes value from PSU5 for step 2
         assert!(sim.psus.iter().all(|psu| psu.enabled));
+    }
+
+    #[test]
+    fn process_command_set_program_id() {
+        let mut sim = Simulator::new(0x1F);
+        sim.fpgas[0].present = true;
+        sim.fpgas[0].pattern_memory_a[10] = 0xDEADBEEF; // Pre-fill some data
+        sim.system_config.clocks_required = true;
+        sim.amon_test_count = 5;
+
+        // Set a non-zero program ID
+        let command1 = format!("<C1F090000{:05}{:05}>", 12345, 54321);
+        let response1 = sim.process_command(command1.as_bytes()).unwrap();
+        assert_eq!(response1, Some(String::from("#OK#")));
+        assert_eq!(sim.prog_id_hint, 12345);
+        assert_eq!(sim.prog_id_lint, 54321);
+        // Verify state is NOT cleared
+        assert_eq!(sim.fpgas[0].pattern_memory_a[10], 0xDEADBEEF);
+        assert_eq!(sim.system_config.clocks_required, true);
+        assert_eq!(sim.amon_test_count, 5);
+
+        // Set a zero program ID to trigger reset
+        let command2 = format!("<C1F090000{:05}{:05}>", 0, 0);
+        let response2 = sim.process_command(command2.as_bytes()).unwrap();
+        assert_eq!(response2, Some(String::from("#OK#")));
+        assert_eq!(sim.prog_id_hint, 0);
+        assert_eq!(sim.prog_id_lint, 0);
+        // Verify state IS cleared
+        assert_eq!(sim.fpgas[0].pattern_memory_a[10], 0);
+        assert_eq!(sim.system_config.clocks_required, false);
+        assert_eq!(sim.amon_test_count, 0);
     }
 
     #[test]

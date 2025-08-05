@@ -28,6 +28,8 @@ pub enum CommandError {
 enum Command {
     /// Command 01: Clears clock failure flags.
     ClearClockFail,
+    /// Command 02: Clears sine wave failure flags.
+    ClearSwFail,
     SequenceOn,
     SequenceOff,
     // Command 50 has several sub-modes for data loading.
@@ -119,6 +121,8 @@ pub struct SineWave {
     pub frequency_base: u32,
     pub duty_cycle: u32,
     pub reset_value: u32,
+    /// Represents if a sine wave has a failure condition.
+    pub has_failure: bool,
 }
 
 // Represents system-wide configuration and error handling settings.
@@ -307,6 +311,7 @@ impl Simulator {
 
         match cmd_id {
             1 => Ok(Command::ClearClockFail),
+            2 => Ok(Command::ClearSwFail),
             3 => Ok(Command::SequenceOn),
             4 => Ok(Command::SequenceOff),
             50 => {
@@ -416,6 +421,12 @@ impl Simulator {
             Command::ClearClockFail => {
                 for gen in self.clock_generators.iter_mut() {
                     gen.has_failure = false;
+                }
+                String::from("#OK#")
+            }
+            Command::ClearSwFail => {
+                for sw in self.sine_waves.iter_mut() {
+                    sw.has_failure = false;
                 }
                 String::from("#OK#")
             }
@@ -1275,6 +1286,22 @@ mod tests {
         assert_eq!(sim.clock_generators[0].has_failure, false);
         assert_eq!(sim.clock_generators[1].has_failure, false); // Should remain false
         assert_eq!(sim.clock_generators[2].has_failure, false);
+    }
+
+    #[test]
+    fn process_command_clear_sw_fail() {
+        let mut sim = Simulator::new(0x1F);
+        // Set a failure state first
+        sim.sine_waves[0].has_failure = true;
+        sim.sine_waves[1].has_failure = true;
+
+        // Process the command
+        let response = sim.process_command(b"<C1F02>").unwrap();
+        assert_eq!(response, Some(String::from("#OK#")));
+
+        // Verify the state was changed
+        assert_eq!(sim.sine_waves[0].has_failure, false);
+        assert_eq!(sim.sine_waves[1].has_failure, false);
     }
 
     #[test]

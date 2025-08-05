@@ -34,6 +34,8 @@ enum Command {
     SequenceOn,
     /// Command 04: Stops the main power and signal sequence.
     SequenceOff,
+    /// Command 05: Starts the power sequence for calibration.
+    SequenceOnCal(u32),
     // Command 50 has several sub-modes for data loading.
     DataLoad(DataLoadMode),
     // ... other commands will be added here
@@ -321,6 +323,14 @@ impl Simulator {
             2 => Ok(Command::ClearSwFail),
             3 => Ok(Command::SequenceOn),
             4 => Ok(Command::SequenceOff),
+            5 => {
+                if content.len() < 19 {
+                    return Err(CommandError::TooShort);
+                }
+                let data_str = &content[14..19];
+                let data = data_str.trim().parse::<u32>().map_err(|_| CommandError::InvalidParameter)?;
+                Ok(Command::SequenceOnCal(data))
+            }
             50 => {
                 // Command 50 has a sub-mode parameter
                 if content.len() < 7 {
@@ -449,6 +459,36 @@ impl Simulator {
             Command::SequenceOff => {
                 self.sequence_on = false;
                 String::from("#OFF#")
+            }
+            Command::SequenceOnCal(step) => {
+                // Collect the setpoint values first to avoid borrowing issues.
+                let s1_values: Vec<u16> = self.psus.iter().map(|p| p.voltage_set_s1).collect();
+                let s2_values: Vec<u16> = self.psus.iter().map(|p| p.voltage_set_s2).collect();
+                let s3_values: Vec<u16> = self.psus.iter().map(|p| p.voltage_set_s3).collect();
+                let s4_values: Vec<u16> = self.psus.iter().map(|p| p.voltage_set_s4).collect();
+
+                for i in 0..6 {
+                    let psu = &mut self.psus[i];
+                    psu.enabled = true; // All PSUs are turned on
+
+                    // Determine the correct voltage setpoint based on the step and PSU index.
+                    // This replicates the logic from the C code, including the quirks for PSU 6.
+                    let setpoint = match step {
+                        1 => if i < 5 { s1_values[i] } else { s1_values[4] },
+                        2 => if i < 5 { s2_values[i] } else { s2_values[4] },
+                        3 => if i < 5 { s3_values[i] } else { s3_values[4] },
+                        4 => if i < 5 { s4_values[i] } else { s3_values[4] }, // Note: uses S3 for PSU6 on step 4
+                        _ => 0, // Default to 0 if step is invalid
+                    };
+
+                    // The DAC values are integers; we'll store them as f32.
+                    // A real implementation might need a voltage conversion formula.
+                    psu.voltage_setpoint = setpoint as f32;
+                }
+
+                self.sequence_on = true;
+                self.system_config.auto_reset_counter = 0;
+                String::from("#ON#")
             }
             Command::DataLoad(mode) => match mode {
                 DataLoadMode::StartPatternLoad => {
@@ -1347,6 +1387,34 @@ mod tests {
         let response_off = sim.process_command(b"<C1F04>").unwrap();
         assert_eq!(response_off, Some(String::from("#OFF#")));
         assert_eq!(sim.sequence_on, false);
+    }
+
+    #[test]
+    fn process_command_sequence_on_cal() {
+        let mut sim = Simulator::new(0x1F);
+        // Pre-configure some PSU step voltages
+        sim.psus[0].voltage_set_s2 = 100;
+        sim.psus[1].voltage_set_s2 = 200;
+        sim.psus[4].voltage_set_s2 = 500;
+        sim.psus[5].voltage_set_s2 = 600; // This should be ignored for step 2
+
+        sim.sequence_on = false;
+        sim.system_config.auto_reset_counter = 99;
+
+        // Command for SequenceOnCal, step 2
+        let response = sim.process_command(b"<C1F0500000000000002>").unwrap();
+        assert_eq!(response, Some(String::from("#ON#")));
+        assert_eq!(sim.sequence_on, true);
+        assert_eq!(sim.system_config.auto_reset_counter, 0);
+
+        // Verify all PSUs are enabled and have the correct voltage setpoint for step 2
+        assert_eq!(sim.psus[0].voltage_setpoint, 100.0);
+        assert_eq!(sim.psus[1].voltage_setpoint, 200.0);
+        assert_eq!(sim.psus[2].voltage_setpoint, 0.0); // Default value
+        assert_eq!(sim.psus[3].voltage_setpoint, 0.0);
+        assert_eq!(sim.psus[4].voltage_setpoint, 500.0);
+        assert_eq!(sim.psus[5].voltage_setpoint, 500.0); // PSU6 takes value from PSU5 for step 2
+        assert!(sim.psus.iter().all(|psu| psu.enabled));
     }
 
     #[test]

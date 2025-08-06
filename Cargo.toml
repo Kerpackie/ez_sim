@@ -14,4 +14,4 @@ name = "simulator_cli"
 path = "src/main.rs"
 
 [dependencies]
-# No external dependencies needed yet.
+serialport = "4.2.2"

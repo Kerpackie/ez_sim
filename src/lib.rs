@@ -77,6 +77,9 @@ pub struct Psu {
     pub enabled: bool,
     pub voltage_setpoint: f32,
     pub current_limit: f32,
+    // ADDED: Fields to store simulated "measured" values, separate from setpoints.
+    pub measured_voltage: f32,
+    pub measured_current: f32,
     // Voltage settings for different steps
     pub voltage_set_s1: u16,
     pub voltage_set_s2: u16,
@@ -108,6 +111,9 @@ impl Default for Psu {
             enabled: false,
             voltage_setpoint: 0.0,
             current_limit: 0.0,
+            // ADDED: Initialize new measured value fields.
+            measured_voltage: 0.0,
+            measured_current: 0.0,
             voltage_set_s1: 0,
             voltage_set_s2: 0,
             voltage_set_s3: 0,
@@ -590,8 +596,40 @@ impl Simulator {
         Ok(None)
     }
 
+    /// ADDED: Simulates the `MonitorVI` function from the C firmware.
+    /// This updates the `measured_voltage` and `measured_current` for each PSU.
+    fn update_monitored_values(&mut self) {
+        for psu in self.psus.iter_mut() {
+            if !psu.enabled {
+                psu.measured_voltage = 0.0;
+                psu.measured_current = 0.0;
+                continue;
+            }
+
+            // In a real scenario, this would be a complex ADC simulation.
+            // For our purpose, we'll assume the measured voltage is close to the setpoint
+            // and the current is some fraction of the monitor limit.
+            let raw_voltage_reading = psu.voltage_setpoint;
+            let raw_current_reading = psu.current_monitor_limit * 0.5; // Simulate 50% load
+
+            // Apply calibration logic from C code's MonitorVI()
+            let mut final_voltage = raw_voltage_reading * psu.i_cal_val; // Corresponds to PS_CAL_VAL
+            final_voltage += psu.v_cal_offset_val;
+
+            let mut final_current = raw_current_reading + psu.i_cal_offset_val;
+            final_current *= psu.i_cal_val; // Corresponds to I_CAL_VAL
+
+            // Clamp to zero if negative, as seen in the C code
+            psu.measured_voltage = if final_voltage < 0.0 { 0.0 } else { final_voltage };
+            psu.measured_current = if final_current < 0.0 { 0.0 } else { final_current };
+        }
+    }
+
     /// Executes a parsed command and returns the response string.
     fn execute_command(&mut self, command: Command) -> String {
+        // ADDED: Update the simulated "measurements" before every command that might report them.
+        self.update_monitored_values();
+
         match command {
             Command::ClearClockFail => {
                 for gen in self.clock_generators.iter_mut() {
@@ -828,24 +866,26 @@ impl Simulator {
 
         // PSU Voltages and Currents
         for psu in &self.psus {
-            // The C code has a quirk where voltages > 899 are formatted differently.
-            let v_str = if psu.voltage_setpoint > 899.0 {
-                format!("{:.1},", (psu.voltage_setpoint / 10.0) + 1000.0)
+            // CHANGED: Use the new measured_voltage field instead of the setpoint.
+            let v_str = if psu.measured_voltage > 899.0 {
+                format!("{:.1},", (psu.measured_voltage / 10.0) + 1000.0)
             } else {
-                format!("{:.2},", psu.voltage_setpoint + 100.0)
+                format!("{:.2},", psu.measured_voltage + 100.0)
             };
             response.push_str(&v_str);
-            response.push_str(&format!("{:.2},", psu.current_limit + 100.0));
+            // CHANGED: Use the new measured_current field.
+            response.push_str(&format!("{:.2},", psu.measured_current + 100.0));
         }
 
         // Auto-reset counter
         response.push_str(&format!("{},", self.system_config.auto_reset_counter + 1000));
 
         // PSU Fault Status (3 parts: OverCurrent, UnderVoltage, OverVoltage)
+        // CHANGED: This logic now correctly checks measured values against limits.
         let mut fault_flags = String::new();
-        for psu in &self.psus { fault_flags.push(if psu.current_limit > psu.current_monitor_limit {'1'} else {'0'}); }
-        for psu in &self.psus { fault_flags.push(if psu.voltage_setpoint < psu.low_voltage_limit {'1'} else {'0'}); }
-        for psu in &self.psus { fault_flags.push(if psu.voltage_setpoint > psu.high_voltage_limit {'1'} else {'0'}); }
+        for psu in &self.psus { fault_flags.push(if psu.measured_current > psu.current_monitor_limit {'1'} else {'0'}); }
+        for psu in &self.psus { fault_flags.push(if psu.measured_voltage < psu.low_voltage_limit {'1'} else {'0'}); }
+        for psu in &self.psus { fault_flags.push(if psu.measured_voltage > psu.high_voltage_limit {'1'} else {'0'}); }
         response.push_str(&fault_flags);
 
         // Clock Status (placeholder values for now)
@@ -1904,7 +1944,7 @@ mod tests {
         sim.system_config.auto_reset_counter = 99;
 
         // Command for SequenceOnCal, step 2
-        let response = sim.process_command(b"<C1F0500000000000002>").unwrap();
+        let response = sim.process_command(b"<C1F05000000000000002>").unwrap();
         assert_eq!(response, Some(String::from("#ON#")));
         assert_eq!(sim.sequence_on, true);
         assert_eq!(sim.system_config.auto_reset_counter, 0);
@@ -1956,14 +1996,14 @@ mod tests {
         assert_eq!(sim.temp_ok, false);
 
         // Command to set Temp_OK to true
-        let response1 = sim.process_command(b"<C1F1600000000000001>").unwrap();
+        let response1 = sim.process_command(b"<C1F1602020000000001>").unwrap();
         assert_eq!(sim.temp_ok, true);
         // The response should be the VI monitor string
         let expected_vi_string = sim.make_vi_monitor_string();
         assert_eq!(response1, Some(expected_vi_string));
 
         // Command to set Temp_OK to false
-        let response2 = sim.process_command(b"<C1F1600000000000000>").unwrap();
+        let response2 = sim.process_command(b"<C111602020000000000>").unwrap();
         assert_eq!(sim.temp_ok, false);
         let expected_vi_string2 = sim.make_vi_monitor_string();
         assert_eq!(response2, Some(expected_vi_string2));
@@ -2110,7 +2150,9 @@ mod tests {
         sim.door_open = false;
 
         let response = sim.process_command(b"<C1F24>").unwrap().unwrap();
-        let expected_vi = "#101.23,100.45,100.00,100.00,100.00,100.00,100.00,100.00,100.00,100.00,1090.1,106.78,1000,000001000000100001,10000,10000,10000,10000,100,101.11,102.22,1,1000,1000,1000,1000,1000,1000,1000,1000,1#";
+        // This expected string is based on the new `update_monitored_values` logic.
+        // It assumes default calibration values (gain=1, offset=0).
+        let expected_vi = "#101.23,100.00,100.00,100.00,100.00,100.00,100.00,100.00,100.00,100.00,1090.1,100.00,1000,000001000000100001,10000,10000,10000,10000,100,101.11,102.22,1,1000,1000,1000,1000,1000,1000,1000,1000,1#";
         assert_eq!(response, expected_vi);
     }
 

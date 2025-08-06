@@ -54,6 +54,8 @@ enum Command {
     GetProgramIdChecksum,
     /// Command 24: Returns the main VI monitoring string.
     GetViMonitorString,
+    /// Command 25: Returns the AMON/DUTMON monitoring string.
+    GetAmonMonitorString,
     // Command 50 has several sub-modes for data loading.
     DataLoad(DataLoadMode),
     // ... other commands will be added here
@@ -342,6 +344,7 @@ pub struct Simulator {
     // AMON module information
     pub amon_present: bool,
     pub amon_type: u8,
+    pub amon_bp: u32,
     // Timer and Alarm values
     pub timer_values: [u32; 4],
     pub alarm_values: [u32; 4],
@@ -397,6 +400,7 @@ impl Simulator {
             sine_waves: Default::default(),
             amon_present: false,
             amon_type: 0xFF,
+            amon_bp: 0,
             timer_values: [0; 4],
             alarm_values: [0; 4],
             system_config: Default::default(),
@@ -472,6 +476,7 @@ impl Simulator {
             22 => Ok(Command::GetProgramId),
             23 => Ok(Command::GetProgramIdChecksum),
             24 => Ok(Command::GetViMonitorString),
+            25 => Ok(Command::GetAmonMonitorString),
             50 => {
                 // Command 50 has a sub-mode parameter
                 if content.len() < 7 {
@@ -685,6 +690,7 @@ impl Simulator {
                 format!("#{}#", self.prog_id_hint + self.prog_id_lint)
             }
             Command::GetViMonitorString => self.make_vi_monitor_string(),
+            Command::GetAmonMonitorString => self.make_amon_monitor_string(),
             Command::DataLoad(mode) => match mode {
                 DataLoadMode::StartPatternLoad => {
                     self.is_pattern_data_loading = true;
@@ -898,6 +904,99 @@ impl Simulator {
 
         // Door Status (last item, no trailing comma) - Note: C code doesn't include door status in fault log string
         response.pop(); // Remove last comma
+        response.push('#');
+        response
+    }
+
+    /// Simulates the pass/fail logic for an AMON test based on linked PSU limits.
+    fn return_amon_read_data_state(&self, measured_value: f32, test: &AmonTest) -> u32 {
+        if test.psu_link == 0 || (test.psu_link as usize) > self.psus.len() {
+            return 0; // No valid PSU link, no state to return
+        }
+
+        let psu = &self.psus[(test.psu_link - 1) as usize];
+
+        // This logic mimics return_AMON_Read_Data_State from main.c
+        if test.test_type == 1 { // Voltage
+            if measured_value > psu.high_voltage_limit { return 1; }
+            if measured_value < psu.low_voltage_limit { return 2; }
+        } else if test.test_type == 2 || test.test_type == 3 { // Current
+            if measured_value > psu.current_monitor_limit { return 1; }
+        }
+        0 // Pass
+    }
+
+    /// Simulates the measurement for a single AMON test.
+    /// Returns a tuple of (measured_value, pass_fail_status).
+    fn measure_amon_test_data(&self, test_index: usize) -> (f32, u32) {
+        let test = &self.amon_tests[test_index];
+        let mut measured_value = 0.0;
+
+        // Since we don't have a real ADC, we'll simulate a reading.
+        // A simple approach is to generate a value that would pass the test.
+        // Let's use the midpoint of the PSU limits linked to this test.
+        let psu_link_index = if test.psu_link > 0 && (test.psu_link as usize) <= self.psus.len() {
+            (test.psu_link - 1) as usize
+        } else {
+            0 // Default to PSU 1 if link is invalid
+        };
+        let psu = &self.psus[psu_link_index];
+
+        // Simulate a reading based on the test type and PSU limits
+        let simulated_adc_reading = match test.test_type {
+            1 => (psu.high_voltage_limit + psu.low_voltage_limit) / 2.0, // Voltage
+            _ => psu.current_monitor_limit / 2.0, // Current
+        };
+
+        match test.test_type {
+            1 | 2 => { // Voltage or Current Reading
+                measured_value = simulated_adc_reading * test.tp1_gain;
+                measured_value -= test.cal_offset;
+                measured_value *= test.cal_gain;
+            }
+            3 => { // Current Summing Reading
+                // Simulate two readings
+                let reading1 = simulated_adc_reading * test.tp1_gain;
+                let reading2 = (simulated_adc_reading * 0.9) * test.tp2_gain; // a slightly different second reading
+                measured_value = (reading1 - reading2).abs(); // Difference
+                measured_value *= test.sum_gain;
+                measured_value -= test.cal_offset;
+                measured_value *= test.cal_gain;
+            }
+            _ => { // Unknown test type
+                measured_value = 0.0;
+            }
+        }
+
+        if measured_value < 0.0 {
+            measured_value = 0.0;
+        }
+
+        let status = self.return_amon_read_data_state(measured_value, test);
+        (measured_value, status)
+    }
+
+    /// Creates the AMON monitoring string, mimicking `Make_AMON_VIMonitorString`.
+    fn make_amon_monitor_string(&self) -> String {
+        let mut response = format!("#{:X},", self.amon_bp + 0x1000);
+
+        if self.amon_test_count > 0 {
+            for i in 0..(self.amon_test_count as usize) {
+                let test = &self.amon_tests[i];
+                let (measured_value, result) = self.measure_amon_test_data(i);
+
+                response.push_str(&format!("{:.2},", measured_value + 100.0));
+                response.push_str(&format!("{},", result));
+                response.push_str(&format!("{},", test.board + 10));
+
+                if i == (self.amon_test_count - 1) as usize {
+                    response.push_str(&format!("{}", test.tag + 100));
+                } else {
+                    response.push_str(&format!("{},", test.tag + 100));
+                }
+            }
+        }
+
         response.push('#');
         response
     }
@@ -1977,6 +2076,44 @@ mod tests {
         let response = sim.process_command(b"<C1F24>").unwrap().unwrap();
         let expected_vi = "#101.23,100.45,100.00,100.00,100.00,100.00,100.00,100.00,100.00,100.00,1090.1,106.78,1000,000001000000100001,10000,10000,10000,10000,100,101.11,102.22,1,1000,1000,1000,1000,1000,1000,1000,1000,1#";
         assert_eq!(response, expected_vi);
+    }
+
+    #[test]
+    fn process_command_25_get_amon_monitor_string() {
+        let mut sim = Simulator::new(0x1F);
+        sim.amon_bp = 0xABCD;
+        sim.amon_test_count = 2;
+
+        // Configure PSU 1 (linked to test 1)
+        sim.psus[0].high_voltage_limit = 5.5;
+        sim.psus[0].low_voltage_limit = 4.5;
+
+        // Configure PSU 2 (linked to test 2)
+        sim.psus[1].current_monitor_limit = 1.0;
+
+        // Configure test 1 (Voltage test)
+        sim.amon_tests[0].test_type = 1;
+        sim.amon_tests[0].psu_link = 1;
+        sim.amon_tests[0].tp1_gain = 1.0;
+        sim.amon_tests[0].cal_gain = 1.0;
+        sim.amon_tests[0].cal_offset = 0.0;
+        sim.amon_tests[0].board = 1;
+        sim.amon_tests[0].tag = 2;
+
+        // Configure test 2 (Current test)
+        sim.amon_tests[1].test_type = 2;
+        sim.amon_tests[1].psu_link = 2;
+        sim.amon_tests[1].tp1_gain = 1.0;
+        sim.amon_tests[1].cal_gain = 1.0;
+        sim.amon_tests[1].cal_offset = 0.0;
+        sim.amon_tests[1].board = 3;
+        sim.amon_tests[1].tag = 4;
+
+        // The simulated reading for test 1 will be (5.5+4.5)/2 = 5.0, which should pass (result 0)
+        // The simulated reading for test 2 will be 1.0/2 = 0.5, which should pass (result 0)
+        let response = sim.process_command(b"<C1F25>").unwrap().unwrap();
+        let expected = "#BBCD,105.00,0,11,102,100.50,0,13,104#";
+        assert_eq!(response, expected);
     }
 
     #[test]

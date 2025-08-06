@@ -74,7 +74,7 @@ impl<'a> App<'a> {
             simulator,
             mode: AppMode::Menu,
             focus: Focus::Menu,
-            logs: vec!["Welcome to the Endzone 250 Simulator TUI!".to_string()],
+            logs: vec!["Welcome to the Endzone 250 Simulator!".to_string()],
             input: String::new(),
             menu_selection: 0,
             log_state: ListState::default(),

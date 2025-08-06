@@ -5,12 +5,12 @@ edition = "2021"
 
 # This section defines the library target, which points to src/lib.rs
 [lib]
-name = "ez_sim"
+name = "ez_sim_lib"
 path = "src/lib.rs"
 
 # This section defines the binary target, which points to src/main.rs
 [[bin]]
-name = "simulator_cli"
+name = "ez_sim"
 path = "src/main.rs"
 
 [dependencies]

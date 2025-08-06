@@ -377,7 +377,7 @@ pub struct Simulator {
     pub bib_code: u16,
     pub bp_res1_present: bool,
     pub bp_res2_present: bool,
-    pub door_open: bool,
+    pub door_open: bool, // C code uses 1 for closed, 0 for open
     // Historical fault logs
     pub fault_logs: Vec<FaultLog>,
     // --- Internal state for data loading sessions ---
@@ -424,7 +424,7 @@ impl Simulator {
             bib_code: 0,
             bp_res1_present: true,
             bp_res2_present: true,
-            door_open: true, // Corresponds to 1 (closed) in C code
+            door_open: false, // Corresponds to 0 (closed) in C code
             fault_logs: vec![FaultLog::default(); 10], // C firmware stores 10 logs
             sram_address: 1,
             pattern_data_checksum: 0,

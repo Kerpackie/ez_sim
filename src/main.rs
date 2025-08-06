@@ -3,7 +3,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ez_sim::{CommandError, Simulator};
+use ez_sim_lib::{CommandError, Simulator};
 use ratatui::{prelude::*, widgets::*};
 use std::{
     io::{self, Write},

@@ -38,6 +38,8 @@ enum Command {
     SequenceOnCal(u32),
     /// Command 09: Sets the program ID and optionally clears memory.
     SetProgramId { address: u32, data: u32 },
+    /// Command 16: Sets the temperature status (Temp_OK flag).
+    SetTempOk(bool),
     /// Command 17: Returns the reference monitoring string.
     MonitorVi,
     /// Command 18: Returns the hardware configuration string.
@@ -332,6 +334,8 @@ pub struct Simulator {
     /// High and low integers for the program ID.
     pub prog_id_hint: u32,
     pub prog_id_lint: u32,
+    /// Represents the temperature status, enabling the timing countdown.
+    pub temp_ok: bool,
     // An array of 6 PSUs, as suggested by the C code (PSU_1_DATA to PSU_6_DATA).
     pub psus: [Psu; 6],
     pub psu_data_codes: [u8; 6],
@@ -393,6 +397,7 @@ impl Simulator {
             sequence_on: false,
             prog_id_hint: 0,
             prog_id_lint: 0,
+            temp_ok: false,
             psus: Default::default(),
             psu_data_codes: [0; 6],
             fpgas: Default::default(),
@@ -455,6 +460,13 @@ impl Simulator {
                 let address = content[9..14].trim().parse::<u32>().map_err(|_| CommandError::InvalidParameter)?;
                 let data = content[14..19].trim().parse::<u32>().map_err(|_| CommandError::InvalidParameter)?;
                 Ok(Command::SetProgramId { address, data })
+            }
+            16 => {
+                if content.len() < 19 {
+                    return Err(CommandError::TooShort);
+                }
+                let data = content[14..19].trim().parse::<u32>().map_err(|_| CommandError::InvalidParameter)?;
+                Ok(Command::SetTempOk(data == 1))
             }
             17 => Ok(Command::MonitorVi),
             18 => Ok(Command::GetConfiguration),
@@ -655,6 +667,11 @@ impl Simulator {
                     }
                 }
                 String::from("#OK#")
+            }
+            Command::SetTempOk(status) => {
+                self.temp_ok = status;
+                // The C code immediately sends back the monitor string after this command.
+                self.make_vi_monitor_string()
             }
             Command::MonitorVi => {
                 // The C code for C17 ONLY sends the reference string.
@@ -1931,6 +1948,25 @@ mod tests {
         assert_eq!(sim.fpgas[0].pattern_memory_a[10], 0);
         assert_eq!(sim.system_config.clocks_required, false);
         assert_eq!(sim.amon_test_count, 0);
+    }
+
+    #[test]
+    fn process_command_16_set_temp_ok() {
+        let mut sim = Simulator::new(0x1F);
+        assert_eq!(sim.temp_ok, false);
+
+        // Command to set Temp_OK to true
+        let response1 = sim.process_command(b"<C1F1600000000000001>").unwrap();
+        assert_eq!(sim.temp_ok, true);
+        // The response should be the VI monitor string
+        let expected_vi_string = sim.make_vi_monitor_string();
+        assert_eq!(response1, Some(expected_vi_string));
+
+        // Command to set Temp_OK to false
+        let response2 = sim.process_command(b"<C1F1600000000000000>").unwrap();
+        assert_eq!(sim.temp_ok, false);
+        let expected_vi_string2 = sim.make_vi_monitor_string();
+        assert_eq!(response2, Some(expected_vi_string2));
     }
 
     #[test]

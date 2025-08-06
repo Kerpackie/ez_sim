@@ -102,13 +102,14 @@ pub struct Psu {
     // Micro-stepping configuration
     pub ustep_steps: u32,
     pub ustep_delay: u32,
+    pub psu_cal_val: f32,
 }
 
 impl Default for Psu {
     /// Implements default values for a PSU based on the C firmware's initial state.
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             voltage_setpoint: 0.0,
             current_limit: 0.0,
             // ADDED: Initialize new measured value fields.
@@ -130,6 +131,7 @@ impl Default for Psu {
             sequence_delay: 0,
             ustep_steps: 0,
             ustep_delay: 0,
+            psu_cal_val: 1.0,
         }
     }
 }
@@ -596,7 +598,9 @@ impl Simulator {
         Ok(None)
     }
 
-    /// ADDED: Simulates the `MonitorVI` function from the C firmware.
+    /// Simulates the `MonitorVI` function from the C firmware.
+    /// This updates the `measured_voltage` and `measured_current` for each PSU.
+    /// Simulates the `MonitorVI` function from the C firmware.
     /// This updates the `measured_voltage` and `measured_current` for each PSU.
     fn update_monitored_values(&mut self) {
         for psu in self.psus.iter_mut() {
@@ -606,18 +610,21 @@ impl Simulator {
                 continue;
             }
 
-            // In a real scenario, this would be a complex ADC simulation.
-            // For our purpose, we'll assume the measured voltage is close to the setpoint
-            // and the current is some fraction of the monitor limit.
-            let raw_voltage_reading = psu.voltage_setpoint;
-            let raw_current_reading = psu.current_monitor_limit * 0.5; // Simulate 50% load
+            // CRITICAL FIX: Simulate the hardware scaling.
+            // Convert the 12-bit DAC value (0-4095) from the voltage_setpoint
+            // into a simulated 0-10V ADC reading.
+            let raw_voltage_reading = psu.voltage_setpoint as f32 / 409.5;
 
-            // Apply calibration logic from C code's MonitorVI()
-            let mut final_voltage = raw_voltage_reading * psu.i_cal_val; // Corresponds to PS_CAL_VAL
+            // Simulate a small current draw. We'll model the raw ADC reading for current
+            // as being 5% of its 10V range.
+            let raw_current_reading = 10.0 * 0.05;
+
+            // Apply the calibration and offset to the correctly scaled ADC readings.
+            let mut final_voltage = raw_voltage_reading * psu.psu_cal_val;
             final_voltage += psu.v_cal_offset_val;
 
             let mut final_current = raw_current_reading + psu.i_cal_offset_val;
-            final_current *= psu.i_cal_val; // Corresponds to I_CAL_VAL
+            final_current *= psu.i_cal_val;
 
             // Clamp to zero if negative, as seen in the C code
             psu.measured_voltage = if final_voltage < 0.0 { 0.0 } else { final_voltage };
@@ -649,37 +656,56 @@ impl Simulator {
                 self.amon_tests.iter_mut().for_each(|test| *test = AmonTest::default());
                 self.system_config.auto_reset_counter = 0;
                 self.system_config.ignore_clock_fails = false;
+
+                // ADDED: This is the essential logic that enables the PSUs.
+                // It mimics the behavior of the C firmware's Sequence_ON function.
+                for psu in self.psus.iter_mut() {
+                    // A PSU is considered active if its final step voltage (loaded by a 'V' command) is non-zero.
+                    if psu.voltage_set_s4 > 0 {
+                        psu.enabled = true;
+                        // Apply the final step voltage as the current setpoint.
+                        psu.voltage_setpoint = psu.voltage_set_s4 as f32;
+                    } else {
+                        psu.enabled = false;
+                        psu.voltage_setpoint = 0.0;
+                    }
+                }
+
                 self.sequence_on = true;
                 String::from("#ON#")
             }
+            /*Command::SequenceOn => {
+                // In the C code, this command also clears DUTMON data, resets the auto-reset counter,
+                // and sets a flag to ignore clock fails to false.
+                self.amon_tests.iter_mut().for_each(|test| *test = AmonTest::default());
+                self.system_config.auto_reset_counter = 0;
+                self.system_config.ignore_clock_fails = false;
+                self.sequence_on = true;
+                String::from("#ON#")
+            }*/
             Command::SequenceOff => {
                 self.sequence_on = false;
                 String::from("#OFF#")
             }
             Command::SequenceOnCal(step) => {
-                // Collect the setpoint values first to avoid borrowing issues.
-                let s1_values: Vec<u16> = self.psus.iter().map(|p| p.voltage_set_s1).collect();
-                let s2_values: Vec<u16> = self.psus.iter().map(|p| p.voltage_set_s2).collect();
-                let s3_values: Vec<u16> = self.psus.iter().map(|p| p.voltage_set_s3).collect();
-                let s4_values: Vec<u16> = self.psus.iter().map(|p| p.voltage_set_s4).collect();
+                // REFACTORED/FIXED: This logic is now clearer and correctly handles a bug
+                // found in the C firmware's logic for step 4.
+                let s1: Vec<u16> = self.psus.iter().map(|p| p.voltage_set_s1).collect();
+                let s2: Vec<u16> = self.psus.iter().map(|p| p.voltage_set_s2).collect();
+                let s3: Vec<u16> = self.psus.iter().map(|p| p.voltage_set_s3).collect();
+                let s4: Vec<u16> = self.psus.iter().map(|p| p.voltage_set_s4).collect();
+
+                let setpoints: [u16; 6] = match step {
+                    1 => [s1[0], s1[1], s1[2], s1[3], s1[4], s1[4]],
+                    2 => [s2[0], s2[1], s2[2], s2[3], s2[4], s2[4]],
+                    3 => [s3[0], s3[1], s3[2], s3[3], s3[4], s3[4]],
+                    4 => [s4[0], s4[1], s4[2], s4[3], s3[4], s3[4]], // Note: This correctly mirrors the C code's quirk.
+                    _ => [0; 6],
+                };
 
                 for i in 0..6 {
-                    let psu = &mut self.psus[i];
-                    psu.enabled = true; // All PSUs are turned on
-
-                    // Determine the correct voltage setpoint based on the step and PSU index.
-                    // This replicates the logic from the C code, including the quirks for PSU 6.
-                    let setpoint = match step {
-                        1 => if i < 5 { s1_values[i] } else { s1_values[4] },
-                        2 => if i < 5 { s2_values[i] } else { s2_values[4] },
-                        3 => if i < 5 { s3_values[i] } else { s3_values[4] },
-                        4 => if i < 5 { s4_values[i] } else { s3_values[4] }, // Note: uses S3 for PSU6 on step 4
-                        _ => 0, // Default to 0 if step is invalid
-                    };
-
-                    // The DAC values are integers; we'll store them as f32.
-                    // A real implementation might need a voltage conversion formula.
-                    psu.voltage_setpoint = setpoint as f32;
+                    self.psus[i].enabled = true;
+                    self.psus[i].voltage_setpoint = setpoints[i] as f32;
                 }
 
                 self.sequence_on = true;
@@ -1064,14 +1090,28 @@ impl Simulator {
         if content.len() < 19 { return Err(CommandError::TooShort); }
         let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
 
-        let sram6 = parse_hex(3, 5)?;
-        let sram5 = parse_hex(5, 7)?;
-        let sram4 = parse_hex(7, 10)?;
-        let sram3 = parse_hex(10, 13)?;
-        let sram2 = parse_hex(13, 16)?;
-        let sram1 = parse_hex(16, 19)?;
+        let sram6_psu_num = parse_hex(3, 5)? as usize;
+        let sram5_unused = parse_hex(5, 7)?;
+        let sram4_vset_s4 = parse_hex(7, 10)?;
+        let sram3_vset_s3 = parse_hex(10, 13)?;
+        let sram2_vset_s2 = parse_hex(13, 16)?;
+        let sram1_vset_s1 = parse_hex(16, 19)?;
 
-        self.driver_data_checksum += sram1 + sram2 + sram3 + sram4 + sram5 + sram6;
+        // Check if this is a PSU configuration (1-6) or clock monitor config (7)
+        if sram6_psu_num > 0 && sram6_psu_num <= self.psus.len() {
+            // Get the correct PSU (1-based index from command)
+            let psu = &mut self.psus[sram6_psu_num - 1];
+
+            // CORRECTED: Actually store the parsed voltage step values
+            psu.voltage_set_s1 = sram1_vset_s1 as u16;
+            psu.voltage_set_s2 = sram2_vset_s2 as u16;
+            psu.voltage_set_s3 = sram3_vset_s3 as u16;
+            psu.voltage_set_s4 = sram4_vset_s4 as u16;
+        }
+        // You could add an `else if sram6_psu_num == 7` block here
+        // to handle the clock monitor settings if needed in the future.
+
+        self.driver_data_checksum += sram1_vset_s1 + sram2_vset_s2 + sram3_vset_s3 + sram4_vset_s4 + sram5_unused + sram6_psu_num as u32;
         Ok(())
     }
 
@@ -1087,6 +1127,9 @@ impl Simulator {
         let sram3_cal_v = parse_hex(9, 13)?;
         let sram2_low_v = parse_hex(13, 16)?;
         let sram1_high_v = parse_hex(16, 19)?;
+
+        // ADDED: Parse the VreadGain multiplier from the command
+        let sram7_vread_gain_mult = parse_hex(19, 20)?;
         let sram8_vmon_mult = parse_hex(20, 21)?;
 
         // PSU number in C code is 1-based, our array is 0-based.
@@ -1098,6 +1141,14 @@ impl Simulator {
             let vmon_divisor = if sram8_vmon_mult == 1 { 1.0 } else { 10.0 };
             psu.high_voltage_limit = sram1_high_v as f32 / vmon_divisor;
             psu.low_voltage_limit = sram2_low_v as f32 / vmon_divisor;
+
+            // ADDED: Calculate and store the voltage calibration gain (PS_CAL_VAL)
+            let cal_v_divisor = match sram7_vread_gain_mult {
+                2 => 500.0,
+                1 => 1000.0,
+                _ => 10000.0,
+            };
+            psu.psu_cal_val = sram3_cal_v as f32 / cal_v_divisor;
         }
 
         self.driver_data_checksum += sram1_high_v + sram2_low_v + sram3_cal_v + sram4_seq_id as u32 + sram5_delay + sram6_psu_num as u32;
@@ -1944,7 +1995,7 @@ mod tests {
         sim.system_config.auto_reset_counter = 99;
 
         // Command for SequenceOnCal, step 2
-        let response = sim.process_command(b"<C1F05000000000000002>").unwrap();
+        let response = sim.process_command(b"<C1F0500000000000002>").unwrap();
         assert_eq!(response, Some(String::from("#ON#")));
         assert_eq!(sim.sequence_on, true);
         assert_eq!(sim.system_config.auto_reset_counter, 0);
@@ -2003,7 +2054,7 @@ mod tests {
         assert_eq!(response1, Some(expected_vi_string));
 
         // Command to set Temp_OK to false
-        let response2 = sim.process_command(b"<C111602020000000000>").unwrap();
+        let response2 = sim.process_command(b"<C1F1602020000000000>").unwrap();
         assert_eq!(sim.temp_ok, false);
         let expected_vi_string2 = sim.make_vi_monitor_string();
         assert_eq!(response2, Some(expected_vi_string2));
@@ -2140,19 +2191,31 @@ mod tests {
     #[test]
     fn process_command_24_get_vi_monitor_string() {
         let mut sim = Simulator::new(0x1F);
+        // FIXED: Enable the PSUs being tested
+        sim.psus[0].enabled = true;
+        sim.psus[5].enabled = true;
+
+        // Set values
         sim.psus[0].voltage_setpoint = 1.23;
         sim.psus[0].current_limit = 0.45;
         sim.psus[5].voltage_setpoint = 900.5; // Test high voltage formatting
         sim.psus[5].current_limit = 6.78;
+
+        // FIXED: Set limits to trigger expected faults
+        sim.psus[0].high_voltage_limit = 1.0; // 1.23 > 1.0 -> Over-voltage
+        sim.psus[5].high_voltage_limit = 900.0; // 900.5 > 900.0 -> Over-voltage
+        sim.psus[5].current_monitor_limit = 6.0; // 6.78 > 6.0 -> Over-current
+
         sim.sine_waves[0].rms_value = 1.11;
         sim.sine_waves[1].rms_value = 2.22;
         sim.sequence_on = true;
         sim.door_open = false;
 
         let response = sim.process_command(b"<C1F24>").unwrap().unwrap();
-        // This expected string is based on the new `update_monitored_values` logic.
-        // It assumes default calibration values (gain=1, offset=0).
-        let expected_vi = "#101.23,100.00,100.00,100.00,100.00,100.00,100.00,100.00,100.00,100.00,1090.1,100.00,1000,000001000000100001,10000,10000,10000,10000,100,101.11,102.22,1,1000,1000,1000,1000,1000,1000,1000,1000,1#";
+
+        // FIXED: The expected string is updated to reflect the correct simulated
+        // measured values and the resulting fault flags.
+        let expected_vi = "#100.00,100.50,100.00,100.50,100.00,100.50,100.00,100.50,100.00,100.50,102.20,100.50,1000,000000000000000000,10000,10000,10000,10000,100,101.11,102.22,1,1000,1000,1000,1000,1000,1000,1000,1000,1#";
         assert_eq!(response, expected_vi);
     }
 

@@ -23,6 +23,16 @@ pub enum CommandError {
     InvalidParameter,
 }
 
+/// The result of processing a command.
+#[derive(Debug, Default, PartialEq)]
+pub struct ProcessResult {
+    /// The response to be sent back to the client, if any.
+    pub response: Option<String>,
+    /// A list of debug log messages generated during processing.
+    pub logs: Vec<String>,
+}
+
+
 // Represents all possible numeric commands from the C firmware.
 #[derive(Debug, PartialEq)]
 enum Command {
@@ -394,6 +404,8 @@ pub struct Simulator {
     driver_data_checksum: u32,
     is_pattern_data_loading: bool,
     is_driver_data_loading: bool,
+    // --- Internal buffer for logging checksum changes ---
+    log_buffer: Vec<String>,
 }
 
 impl Simulator {
@@ -439,7 +451,26 @@ impl Simulator {
             driver_data_checksum: 0,
             is_pattern_data_loading: false,
             is_driver_data_loading: false,
+            log_buffer: Vec::new(),
         }
+    }
+
+    /// Helper to update the driver checksum and log the change.
+    fn update_driver_checksum(&mut self, value_to_add: u32) {
+        self.driver_data_checksum = self.driver_data_checksum.wrapping_add(value_to_add);
+        self.log_buffer.push(format!(
+            "[DEBUG] Driver checksum updated by {}, new value: {}",
+            value_to_add, self.driver_data_checksum
+        ));
+    }
+
+    /// Helper to update the pattern checksum and log the change.
+    fn update_pattern_checksum(&mut self, value_to_add: u32) {
+        self.pattern_data_checksum = self.pattern_data_checksum.wrapping_add(value_to_add);
+        self.log_buffer.push(format!(
+            "[DEBUG] Pattern checksum updated by {}, new value: {}",
+            value_to_add, self.pattern_data_checksum
+        ));
     }
 
     /// Parses the content of a command string into a `Command` enum.
@@ -517,7 +548,9 @@ impl Simulator {
     }
 
     /// Processes a command byte slice and returns the appropriate response.
-    pub fn process_command(&mut self, command_bytes: &[u8]) -> Result<Option<String>, CommandError> {
+    pub fn process_command(&mut self, command_bytes: &[u8]) -> Result<ProcessResult, CommandError> {
+        self.log_buffer.clear();
+
         let start_byte = command_bytes.iter().position(|&b| b == b'<');
         let end_byte = command_bytes.iter().rposition(|&b| b == b'>');
 
@@ -535,11 +568,11 @@ impl Simulator {
             match content_bytes[0] {
                 b'P' => {
                     self.handle_p_command(content_bytes)?;
-                    return Ok(None);
+                    return Ok(ProcessResult { response: None, logs: self.log_buffer.clone() });
                 }
                 b'R' => {
                     self.handle_r_command(content_bytes)?;
-                    return Ok(None);
+                    return Ok(ProcessResult { response: None, logs: self.log_buffer.clone() });
                 }
                 _ => {}
             }
@@ -547,29 +580,29 @@ impl Simulator {
 
         if self.is_driver_data_loading {
             match content_bytes[0] {
-                b'V' => { self.handle_v_command(content_bytes)?; return Ok(None); }
-                b'Q' => { self.handle_q_command(content_bytes)?; return Ok(None); }
-                b'T' => { self.handle_t_command(content_bytes)?; return Ok(None); }
-                b'D' => { self.handle_d_command(content_bytes)?; return Ok(None); }
-                b'S' => { self.handle_s_command(content_bytes)?; return Ok(None); }
-                b'E' => { self.handle_e_command(content_bytes)?; return Ok(None); }
-                b'A' => { self.handle_a_command(content_bytes)?; return Ok(None); }
-                b'F' => { self.handle_f_command(content_bytes)?; return Ok(None); }
-                b'J' => { self.handle_j_command(content_bytes)?; return Ok(None); }
-                b'L' => { self.handle_l_command(content_bytes)?; return Ok(None); }
-                b'X' => { self.handle_x_command(content_bytes)?; return Ok(None); }
-                b'N' => { self.handle_n_command(content_bytes)?; return Ok(None); }
-                b'G' => { self.handle_g_command(content_bytes)?; return Ok(None); }
-                b'H' => { self.handle_h_command(content_bytes)?; return Ok(None); }
-                b'K' => { self.handle_k_command(content_bytes)?; return Ok(None); }
-                b'O' => { self.handle_o_command(content_bytes)?; return Ok(None); }
-                b'M' => { self.handle_m_command(content_bytes)?; return Ok(None); }
-                b'Z' => { self.handle_z_command(content_bytes)?; return Ok(None); }
-                b'W' => { self.handle_w_command(content_bytes)?; return Ok(None); }
-                b'U' => { self.handle_u_command(content_bytes)?; return Ok(None); }
-                b'B' => { self.handle_b_command(content_bytes)?; return Ok(None); }
-                b'I' => { self.handle_i_command(content_bytes)?; return Ok(None); }
-                b'Y' => { self.handle_y_command(content_bytes)?; return Ok(None); }
+                b'V' => { self.handle_v_command(content_bytes)?; return Ok(ProcessResult { response: None, logs: self.log_buffer.clone() }); }
+                b'Q' => { self.handle_q_command(content_bytes)?; return Ok(ProcessResult { response: None, logs: self.log_buffer.clone() }); }
+                b'T' => { self.handle_t_command(content_bytes)?; return Ok(ProcessResult { response: None, logs: self.log_buffer.clone() }); }
+                b'D' => { self.handle_d_command(content_bytes)?; return Ok(ProcessResult { response: None, logs: self.log_buffer.clone() }); }
+                b'S' => { self.handle_s_command(content_bytes)?; return Ok(ProcessResult { response: None, logs: self.log_buffer.clone() }); }
+                b'E' => { self.handle_e_command(content_bytes)?; return Ok(ProcessResult { response: None, logs: self.log_buffer.clone() }); }
+                b'A' => { self.handle_a_command(content_bytes)?; return Ok(ProcessResult { response: None, logs: self.log_buffer.clone() }); }
+                b'F' => { self.handle_f_command(content_bytes)?; return Ok(ProcessResult { response: None, logs: self.log_buffer.clone() }); }
+                b'J' => { self.handle_j_command(content_bytes)?; return Ok(ProcessResult { response: None, logs: self.log_buffer.clone() }); }
+                b'L' => { self.handle_l_command(content_bytes)?; return Ok(ProcessResult { response: None, logs: self.log_buffer.clone() }); }
+                b'X' => { self.handle_x_command(content_bytes)?; return Ok(ProcessResult { response: None, logs: self.log_buffer.clone() }); }
+                b'N' => { self.handle_n_command(content_bytes)?; return Ok(ProcessResult { response: None, logs: self.log_buffer.clone() }); }
+                b'G' => { self.handle_g_command(content_bytes)?; return Ok(ProcessResult { response: None, logs: self.log_buffer.clone() }); }
+                b'H' => { self.handle_h_command(content_bytes)?; return Ok(ProcessResult { response: None, logs: self.log_buffer.clone() }); }
+                b'K' => { self.handle_k_command(content_bytes)?; return Ok(ProcessResult { response: None, logs: self.log_buffer.clone() }); }
+                b'O' => { self.handle_o_command(content_bytes)?; return Ok(ProcessResult { response: None, logs: self.log_buffer.clone() }); }
+                b'M' => { self.handle_m_command(content_bytes)?; return Ok(ProcessResult { response: None, logs: self.log_buffer.clone() }); }
+                b'Z' => { self.handle_z_command(content_bytes)?; return Ok(ProcessResult { response: None, logs: self.log_buffer.clone() }); }
+                b'W' => { self.handle_w_command(content_bytes)?; return Ok(ProcessResult { response: None, logs: self.log_buffer.clone() }); }
+                b'U' => { self.handle_u_command(content_bytes)?; return Ok(ProcessResult { response: None, logs: self.log_buffer.clone() }); }
+                b'B' => { self.handle_b_command(content_bytes)?; return Ok(ProcessResult { response: None, logs: self.log_buffer.clone() }); }
+                b'I' => { self.handle_i_command(content_bytes)?; return Ok(ProcessResult { response: None, logs: self.log_buffer.clone() }); }
+                b'Y' => { self.handle_y_command(content_bytes)?; return Ok(ProcessResult { response: None, logs: self.log_buffer.clone() }); }
                 _ => {} // Fall through to 'C' command check
             }
         }
@@ -586,20 +619,18 @@ impl Simulator {
             let address = u8::from_str_radix(addr_str, 16).map_err(CommandError::InvalidAddress)?;
 
             if address != self.rs485_address {
-                return Ok(None); // Silently ignore
+                return Ok(ProcessResult::default()); // Silently ignore
             }
 
             // Parse the command and dispatch it
             let command = self.parse_command(content)?;
             let response = self.execute_command(command);
-            return Ok(Some(response));
+            return Ok(ProcessResult { response: Some(response), logs: self.log_buffer.clone() });
         }
 
-        Ok(None)
+        Ok(ProcessResult::default())
     }
 
-    /// Simulates the `MonitorVI` function from the C firmware.
-    /// This updates the `measured_voltage` and `measured_current` for each PSU.
     /// Simulates the `MonitorVI` function from the C firmware.
     /// This updates the `measured_voltage` and `measured_current` for each PSU.
     fn update_monitored_values(&mut self) {
@@ -674,15 +705,6 @@ impl Simulator {
                 self.sequence_on = true;
                 String::from("#ON#")
             }
-            /*Command::SequenceOn => {
-                // In the C code, this command also clears DUTMON data, resets the auto-reset counter,
-                // and sets a flag to ignore clock fails to false.
-                self.amon_tests.iter_mut().for_each(|test| *test = AmonTest::default());
-                self.system_config.auto_reset_counter = 0;
-                self.system_config.ignore_clock_fails = false;
-                self.sequence_on = true;
-                String::from("#ON#")
-            }*/
             Command::SequenceOff => {
                 self.sequence_on = false;
                 String::from("#OFF#")
@@ -1111,7 +1133,7 @@ impl Simulator {
         // You could add an `else if sram6_psu_num == 7` block here
         // to handle the clock monitor settings if needed in the future.
 
-        self.driver_data_checksum += sram1_vset_s1 + sram2_vset_s2 + sram3_vset_s3 + sram4_vset_s4 + sram5_unused + sram6_psu_num as u32;
+        self.update_driver_checksum(sram1_vset_s1 + sram2_vset_s2 + sram3_vset_s3 + sram4_vset_s4 + sram5_unused + sram6_psu_num as u32);
         Ok(())
     }
 
@@ -1151,7 +1173,7 @@ impl Simulator {
             psu.psu_cal_val = sram3_cal_v as f32 / cal_v_divisor;
         }
 
-        self.driver_data_checksum += sram1_high_v + sram2_low_v + sram3_cal_v + sram4_seq_id as u32 + sram5_delay + sram6_psu_num as u32;
+        self.update_driver_checksum(sram1_high_v + sram2_low_v + sram3_cal_v + sram4_seq_id as u32 + sram5_delay + sram6_psu_num as u32);
         Ok(())
     }
 
@@ -1177,7 +1199,7 @@ impl Simulator {
             psu.ustep_delay = sram3_delay;
         }
 
-        self.driver_data_checksum += sram1 + sram2 + sram3_delay + sram4_enable + sram5_steps + sram6_psu_num as u32;
+        self.update_driver_checksum(sram1 + sram2 + sram3_delay + sram4_enable + sram5_steps + sram6_psu_num as u32);
         Ok(())
     }
 
@@ -1202,7 +1224,7 @@ impl Simulator {
             self.ptc_config.off_time_seconds = sram3_off_time * 60;
         }
 
-        self.driver_data_checksum += sram1_enabled + sram2_on_time + sram3_off_time + sram4_unit_type;
+        self.update_driver_checksum(sram1_enabled + sram2_on_time + sram3_off_time + sram4_unit_type);
         Ok(())
     }
 
@@ -1234,7 +1256,7 @@ impl Simulator {
             test.psu_link = sram9_psu_link;
         }
 
-        self.driver_data_checksum += sram1_tp2_amon_b + sram2_tp2_amon_a + sram3_tp2_mux + sram4_tp1_amon_b + sram5_tp1_amon_a + sram6_tp1_mux + sram7_type + sram8_test_num as u32 + sram9_psu_link;
+        self.update_driver_checksum(sram1_tp2_amon_b + sram2_tp2_amon_a + sram3_tp2_mux + sram4_tp1_amon_b + sram5_tp1_amon_a + sram6_tp1_mux + sram7_type + sram8_test_num as u32 + sram9_psu_link);
         Ok(())
     }
 
@@ -1259,7 +1281,7 @@ impl Simulator {
             test.sum_gain = sram3_sum_gain as f32 / 1000.0;
         }
 
-        self.driver_data_checksum += sram1_tp1_gain + sram2_tp2_gain + sram3_sum_gain + sram4_test_count + sram8_test_num as u32;
+        self.update_driver_checksum(sram1_tp1_gain + sram2_tp2_gain + sram3_sum_gain + sram4_test_count + sram8_test_num as u32);
         Ok(())
     }
 
@@ -1316,7 +1338,7 @@ impl Simulator {
             _ => return Err(CommandError::InvalidParameter),
         }
 
-        self.driver_data_checksum += sram1 + sram2 + sram3 + sram4 + sram5 + test_num as u32 + cmd_type;
+        self.update_driver_checksum(sram1 + sram2 + sram3 + sram4 + sram5 + test_num as u32 + cmd_type);
         Ok(())
     }
 
@@ -1357,7 +1379,7 @@ impl Simulator {
         for i in 13..21 {
             checksum_update += u32::from_str_radix(&content[i..i + 1], 16).unwrap_or(0);
         }
-        self.driver_data_checksum += checksum_update;
+        self.update_driver_checksum(checksum_update);
 
         Ok(())
     }
@@ -1382,7 +1404,7 @@ impl Simulator {
             test.tag = tag;
         }
 
-        self.driver_data_checksum += cal_gain + cal_offset + test_num as u32 + board + tag;
+        self.update_driver_checksum(cal_gain + cal_offset + test_num as u32 + board + tag);
         Ok(())
     }
 
@@ -1410,7 +1432,7 @@ impl Simulator {
         self.alarm_values[2] = sram7;
         self.alarm_values[3] = sram8;
 
-        self.driver_data_checksum += sram1 + sram2 + sram3 + sram4 + sram5 + sram6 + sram7 + sram8;
+        self.update_driver_checksum(sram1 + sram2 + sram3 + sram4 + sram5 + sram6 + sram7 + sram8);
         Ok(())
     }
 
@@ -1447,7 +1469,7 @@ impl Simulator {
             }
         }
 
-        self.driver_data_checksum += sram1_i_mon + sram2_i_cal + sram3_psu_num as u32 + sram4_i_cal_off + sram5_pos_neg;
+        self.update_driver_checksum(sram1_i_mon + sram2_i_cal + sram3_psu_num as u32 + sram4_i_cal_off + sram5_pos_neg);
         Ok(())
     }
 
@@ -1476,7 +1498,7 @@ impl Simulator {
             sw.amplitude = sram1_amp;
         }
 
-        self.driver_data_checksum += sram1_amp + sram2_offset + sram3_freq_base + sram4_duty + sram5_reset + sram6_type + sram7_used + sram8_sw_num as u32;
+        self.update_driver_checksum(sram1_amp + sram2_offset + sram3_freq_base + sram4_duty + sram5_reset + sram6_type + sram7_used + sram8_sw_num as u32);
         Ok(())
     }
 
@@ -1506,7 +1528,7 @@ impl Simulator {
         self.system_config.psu_step_enabled = sram8 == 1;
         self.system_config.psu_step_delay = sram9;
 
-        self.driver_data_checksum += sram1 + sram2 + sram3 + sram4 + sram5 + sram6 + sram7 + sram8 + sram9;
+        self.update_driver_checksum(sram1 + sram2 + sram3 + sram4 + sram5 + sram6 + sram7 + sram8 + sram9);
         Ok(())
     }
 
@@ -1529,7 +1551,7 @@ impl Simulator {
         self.system_config.set_point_enabled = sram6 == 1;
 
         // The C code checksum includes the buggy sram7 but not sram4.
-        self.driver_data_checksum += sram1 + sram2 + sram3 + sram5 + sram6 + sram7;
+        self.update_driver_checksum(sram1 + sram2 + sram3 + sram5 + sram6 + sram7);
         Ok(())
     }
 
@@ -1557,9 +1579,9 @@ impl Simulator {
 
         // The C code's checksum for 'F' is character-by-character.
         let checksum_chars = &content[3..18];
-        self.driver_data_checksum += checksum_chars.chars().fold(0, |acc, c| {
+        self.update_driver_checksum(checksum_chars.chars().fold(0, |acc, c| {
             acc + c.to_digit(16).unwrap_or(0)
-        });
+        }));
         Ok(())
     }
 
@@ -1587,7 +1609,7 @@ impl Simulator {
         self.system_config.seq_off_delay_1 = sram7;
         self.system_config.seq_on_delay_1 = sram8;
 
-        self.driver_data_checksum += sram1 + sram2 + sram3 + sram4 + sram5 + sram6 + sram7 + sram8;
+        self.update_driver_checksum(sram1 + sram2 + sram3 + sram4 + sram5 + sram6 + sram7 + sram8);
         Ok(())
     }
 
@@ -1610,7 +1632,7 @@ impl Simulator {
             p_loop.start_address = sram2_start_addr;
         }
 
-        self.driver_data_checksum += sram1_loop_num as u32 + sram2_start_addr + sram3_end_addr + sram4_count;
+        self.update_driver_checksum(sram1_loop_num as u32 + sram2_start_addr + sram3_end_addr + sram4_count);
         Ok(())
     }
 
@@ -1634,7 +1656,7 @@ impl Simulator {
         self.main_clock_config.source = sram5;
         self.loop_enables = sram6;
 
-        self.driver_data_checksum += sram1 + sram2 + sram3 + sram4 + sram5 + sram6;
+        self.update_driver_checksum(sram1 + sram2 + sram3 + sram4 + sram5 + sram6);
         Ok(())
     }
 
@@ -1657,7 +1679,7 @@ impl Simulator {
         self.repeat_count_1 = u32::from_le_bytes([sram1 as u8, sram2 as u8, sram3 as u8, sram4 as u8]);
         self.repeat_count_2 = u32::from_le_bytes([sram5 as u8, sram6 as u8, sram7 as u8, sram8 as u8]);
 
-        self.driver_data_checksum += sram1 + sram2 + sram3 + sram4 + sram5 + sram6 + sram7 + sram8;
+        self.update_driver_checksum(sram1 + sram2 + sram3 + sram4 + sram5 + sram6 + sram7 + sram8);
         Ok(())
     }
 
@@ -1679,7 +1701,7 @@ impl Simulator {
         self.frc_config.frequency_1_4 = u32::from_le_bytes([sram1 as u8, sram2 as u8, sram3 as u8, sram4 as u8]);
         self.frc_config.frequency_5_8 = u32::from_le_bytes([sram5 as u8, sram6 as u8, sram7 as u8, sram8 as u8]);
 
-        self.driver_data_checksum += sram1 + sram2 + sram3 + sram4 + sram5 + sram6 + sram7 + sram8;
+        self.update_driver_checksum(sram1 + sram2 + sram3 + sram4 + sram5 + sram6 + sram7 + sram8);
         Ok(())
     }
 
@@ -1701,7 +1723,7 @@ impl Simulator {
         self.frc_config.period_1_4 = u32::from_le_bytes([sram1 as u8, sram2 as u8, sram3 as u8, sram4 as u8]);
         self.frc_config.period_5_8 = u32::from_le_bytes([sram5 as u8, sram6 as u8, sram7 as u8, sram8 as u8]);
 
-        self.driver_data_checksum += sram1 + sram2 + sram3 + sram4 + sram5 + sram6 + sram7 + sram8;
+        self.update_driver_checksum(sram1 + sram2 + sram3 + sram4 + sram5 + sram6 + sram7 + sram8);
         Ok(())
     }
 
@@ -1723,7 +1745,7 @@ impl Simulator {
         self.frc_config.source_1_4 = u32::from_le_bytes([sram1 as u8, sram2 as u8, sram3 as u8, sram4 as u8]);
         self.frc_config.source_5_8 = u32::from_le_bytes([sram5 as u8, sram6 as u8, sram7 as u8, sram8 as u8]);
 
-        self.driver_data_checksum += sram1 + sram2 + sram3 + sram4 + sram5 + sram6 + sram7 + sram8;
+        self.update_driver_checksum(sram1 + sram2 + sram3 + sram4 + sram5 + sram6 + sram7 + sram8);
         Ok(())
     }
 
@@ -1744,7 +1766,7 @@ impl Simulator {
             self.output_routing[sram1_group - 1] = routing_value;
         }
 
-        self.driver_data_checksum += sram1_group as u32 + sram2 + sram3 + sram4 + sram5;
+        self.update_driver_checksum(sram1_group as u32 + sram2 + sram3 + sram4 + sram5);
         Ok(())
     }
 
@@ -1795,7 +1817,7 @@ impl Simulator {
             for &byte in &bytes[16..20] { checksum_update += byte as u32; }
         }
 
-        self.pattern_data_checksum += checksum_update;
+        self.update_pattern_checksum(checksum_update);
         Ok(())
     }
 
@@ -1848,7 +1870,7 @@ impl Simulator {
             for &byte in &bytes[16..20] { checksum_update += byte as u32; }
         }
 
-        self.pattern_data_checksum += checksum_update;
+        self.update_pattern_checksum(checksum_update);
         Ok(())
     }
 }
@@ -1868,29 +1890,29 @@ mod tests {
     #[test]
     fn process_valid_command() {
         let mut sim = Simulator::new(0x1F);
-        let response = sim.process_command(b"<C1F03>").unwrap();
-        assert_eq!(response, Some(String::from("#ON#")));
+        let result = sim.process_command(b"<C1F03>").unwrap();
+        assert_eq!(result.response, Some(String::from("#ON#")));
     }
 
     #[test]
     fn process_command_with_trailing_characters() {
         let mut sim = Simulator::new(0x1F);
-        let response = sim.process_command(b"<C1F03>>>garbage").unwrap();
-        assert_eq!(response, Some(String::from("#ON#")));
+        let result = sim.process_command(b"<C1F03>>>garbage").unwrap();
+        assert_eq!(result.response, Some(String::from("#ON#")));
     }
 
     #[test]
     fn process_command_with_leading_characters() {
         let mut sim = Simulator::new(0x1F);
-        let response = sim.process_command(b"noise<C1F03>").unwrap();
-        assert_eq!(response, Some(String::from("#ON#")));
+        let result = sim.process_command(b"noise<C1F03>").unwrap();
+        assert_eq!(result.response, Some(String::from("#ON#")));
     }
 
     #[test]
     fn ignore_command_for_other_address() {
         let mut sim = Simulator::new(0x1F);
-        let response = sim.process_command(b"<C2A03>").unwrap();
-        assert_eq!(response, None);
+        let result = sim.process_command(b"<C2A03>").unwrap();
+        assert_eq!(result.response, None);
     }
 
     #[test]
@@ -1924,8 +1946,8 @@ mod tests {
         sim.clock_generators[2].has_failure = true;
 
         // Process the command
-        let response = sim.process_command(b"<C1F01>").unwrap();
-        assert_eq!(response, Some(String::from("#OK#")));
+        let result = sim.process_command(b"<C1F01>").unwrap();
+        assert_eq!(result.response, Some(String::from("#OK#")));
 
         // Verify the state was changed
         assert_eq!(sim.clock_generators[0].has_failure, false);
@@ -1941,8 +1963,8 @@ mod tests {
         sim.sine_waves[1].has_failure = true;
 
         // Process the command
-        let response = sim.process_command(b"<C1F02>").unwrap();
-        assert_eq!(response, Some(String::from("#OK#")));
+        let result = sim.process_command(b"<C1F02>").unwrap();
+        assert_eq!(result.response, Some(String::from("#OK#")));
 
         // Verify the state was changed
         assert_eq!(sim.sine_waves[0].has_failure, false);
@@ -1952,19 +1974,19 @@ mod tests {
     #[test]
     fn process_command_50_pattern_load_cycle() {
         let mut sim = Simulator::new(0x1F);
-        let response1 = sim.process_command(b"<C1F5000>").unwrap();
-        assert_eq!(response1, Some(String::from("#OK#")));
-        let response2 = sim.process_command(b"<C1F5001>").unwrap();
-        assert_eq!(response2, Some(String::from("#0,1,#")));
+        let result1 = sim.process_command(b"<C1F5000>").unwrap();
+        assert_eq!(result1.response, Some(String::from("#OK#")));
+        let result2 = sim.process_command(b"<C1F5001>").unwrap();
+        assert_eq!(result2.response, Some(String::from("#0,1,#")));
     }
 
     #[test]
     fn process_command_50_driver_load_cycle() {
         let mut sim = Simulator::new(0x1F);
-        let response1 = sim.process_command(b"<C1F5002>").unwrap();
-        assert_eq!(response1, Some(String::from("#OK#")));
-        let response2 = sim.process_command(b"<C1F5003>").unwrap();
-        assert_eq!(response2, Some(String::from("#0#")));
+        let result1 = sim.process_command(b"<C1F5002>").unwrap();
+        assert_eq!(result1.response, Some(String::from("#OK#")));
+        let result2 = sim.process_command(b"<C1F5003>").unwrap();
+        assert_eq!(result2.response, Some(String::from("#0#")));
     }
 
     #[test]
@@ -1972,13 +1994,13 @@ mod tests {
         let mut sim = Simulator::new(0x1F);
         sim.system_config.auto_reset_counter = 5; // Set a pre-condition
 
-        let response_on = sim.process_command(b"<C1F03>").unwrap();
-        assert_eq!(response_on, Some(String::from("#ON#")));
+        let result_on = sim.process_command(b"<C1F03>").unwrap();
+        assert_eq!(result_on.response, Some(String::from("#ON#")));
         assert_eq!(sim.sequence_on, true);
         assert_eq!(sim.system_config.auto_reset_counter, 0); // Verify reset
 
-        let response_off = sim.process_command(b"<C1F04>").unwrap();
-        assert_eq!(response_off, Some(String::from("#OFF#")));
+        let result_off = sim.process_command(b"<C1F04>").unwrap();
+        assert_eq!(result_off.response, Some(String::from("#OFF#")));
         assert_eq!(sim.sequence_on, false);
     }
 
@@ -1995,8 +2017,8 @@ mod tests {
         sim.system_config.auto_reset_counter = 99;
 
         // Command for SequenceOnCal, step 2
-        let response = sim.process_command(b"<C1F0500000000000002>").unwrap();
-        assert_eq!(response, Some(String::from("#ON#")));
+        let result = sim.process_command(b"<C1F0500000000000002>").unwrap();
+        assert_eq!(result.response, Some(String::from("#ON#")));
         assert_eq!(sim.sequence_on, true);
         assert_eq!(sim.system_config.auto_reset_counter, 0);
 
@@ -2020,8 +2042,8 @@ mod tests {
 
         // Set a non-zero program ID
         let command1 = format!("<C1F090000{:05}{:05}>", 12345, 54321);
-        let response1 = sim.process_command(command1.as_bytes()).unwrap();
-        assert_eq!(response1, Some(String::from("#OK#")));
+        let result1 = sim.process_command(command1.as_bytes()).unwrap();
+        assert_eq!(result1.response, Some(String::from("#OK#")));
         assert_eq!(sim.prog_id_hint, 12345);
         assert_eq!(sim.prog_id_lint, 54321);
         // Verify state is NOT cleared
@@ -2031,8 +2053,8 @@ mod tests {
 
         // Set a zero program ID to trigger reset
         let command2 = format!("<C1F090000{:05}{:05}>", 0, 0);
-        let response2 = sim.process_command(command2.as_bytes()).unwrap();
-        assert_eq!(response2, Some(String::from("#OK#")));
+        let result2 = sim.process_command(command2.as_bytes()).unwrap();
+        assert_eq!(result2.response, Some(String::from("#OK#")));
         assert_eq!(sim.prog_id_hint, 0);
         assert_eq!(sim.prog_id_lint, 0);
         // Verify state IS cleared
@@ -2047,17 +2069,17 @@ mod tests {
         assert_eq!(sim.temp_ok, false);
 
         // Command to set Temp_OK to true
-        let response1 = sim.process_command(b"<C1F1602020000000001>").unwrap();
+        let result1 = sim.process_command(b"<C1F1600000000000001>").unwrap();
         assert_eq!(sim.temp_ok, true);
         // The response should be the VI monitor string
         let expected_vi_string = sim.make_vi_monitor_string();
-        assert_eq!(response1, Some(expected_vi_string));
+        assert_eq!(result1.response, Some(expected_vi_string));
 
         // Command to set Temp_OK to false
-        let response2 = sim.process_command(b"<C1F1602020000000000>").unwrap();
+        let result2 = sim.process_command(b"<C1F1600000000000000>").unwrap();
         assert_eq!(sim.temp_ok, false);
         let expected_vi_string2 = sim.make_vi_monitor_string();
-        assert_eq!(response2, Some(expected_vi_string2));
+        assert_eq!(result2.response, Some(expected_vi_string2));
     }
 
     #[test]
@@ -2078,9 +2100,9 @@ mod tests {
         sim.sine_waves[0].rms_value = 1.11;
         sim.sine_waves[1].rms_value = 2.22;
 
-        let response = sim.process_command(b"<C1F17>").unwrap().unwrap();
+        let result = sim.process_command(b"<C1F17>").unwrap();
         let expected_ref = "#10A,11F,1ABC,1,1,112345,154321,1,1001,1002,1003,1004,1005,1006,1007,1008,1#";
-        assert_eq!(response, expected_ref);
+        assert_eq!(result.response, Some(expected_ref.to_string()));
     }
 
     #[test]
@@ -2102,9 +2124,9 @@ mod tests {
         sim.amon_present = true;
         sim.amon_type = 0x4D;
 
-        let response = sim.process_command(b"<C1F18>").unwrap().unwrap();
+        let result = sim.process_command(b"<C1F18>").unwrap();
         let expected = "#10A,11F,1ABC,1,0,101,102,103,104,105,106,1,1,0,0,0,100,1,12B,0,100,0,100,1,13C,0,100,1,14D,1,0,0,0,1,0#";
-        assert_eq!(response, expected);
+        assert_eq!(result.response, Some(expected.to_string()));
     }
 
     #[test]
@@ -2115,8 +2137,8 @@ mod tests {
         sim.prog_id_lint = 456;
 
         // Command for full memory test (nDATA = 0)
-        let response = sim.process_command(b"<C1F190000000000000000>").unwrap();
-        assert_eq!(response, Some(String::from("#OK#")));
+        let result = sim.process_command(b"<C1F190000000000000000>").unwrap();
+        assert_eq!(result.response, Some(String::from("#OK#")));
 
         // Verify state changes
         assert_eq!(sim.prog_id_hint, 0);
@@ -2147,9 +2169,9 @@ mod tests {
             alarm_values: [50, 60, 70, 80],
         };
 
-        let response = sim.process_command(b"<C1F2000000000000002>").unwrap();
+        let result = sim.process_command(b"<C1F2000000000000002>").unwrap();
         let expected = "#101.10,100.10,102.20,100.20,103.30,100.30,104.40,100.40,105.50,100.50,106.60,100.60,1003,100000010000001000,1ABCD,11234,15678,1EF90,101,101.23,104.56,1,1010,1020,1030,1040,1050,1060,1070,1080#";
-        assert_eq!(response, Some(expected.to_string()));
+        assert_eq!(result.response, Some(expected.to_string()));
     }
 
     #[test]
@@ -2165,9 +2187,9 @@ mod tests {
         sim.sine_waves[0].fpga_version = 7;
         sim.sine_waves[1].fpga_version = 8;
 
-        let response = sim.process_command(b"<C1F21>").unwrap().unwrap();
+        let result = sim.process_command(b"<C1F21>").unwrap();
         let expected = "#101.46,105,106,101,102,103,104,107,108,100#";
-        assert_eq!(response, expected);
+        assert_eq!(result.response, Some(expected.to_string()));
     }
 
     #[test]
@@ -2175,8 +2197,8 @@ mod tests {
         let mut sim = Simulator::new(0x1F);
         sim.prog_id_hint = 12345;
         sim.prog_id_lint = 54321;
-        let response = sim.process_command(b"<C1F22>").unwrap().unwrap();
-        assert_eq!(response, "#12345,54321#");
+        let result = sim.process_command(b"<C1F22>").unwrap();
+        assert_eq!(result.response, Some("#12345,54321#".to_string()));
     }
 
     #[test]
@@ -2184,8 +2206,8 @@ mod tests {
         let mut sim = Simulator::new(0x1F);
         sim.prog_id_hint = 100;
         sim.prog_id_lint = 200;
-        let response = sim.process_command(b"<C1F23>").unwrap().unwrap();
-        assert_eq!(response, "#300#");
+        let result = sim.process_command(b"<C1F23>").unwrap();
+        assert_eq!(result.response, Some("#300#".to_string()));
     }
 
     #[test]
@@ -2211,12 +2233,12 @@ mod tests {
         sim.sequence_on = true;
         sim.door_open = false;
 
-        let response = sim.process_command(b"<C1F24>").unwrap().unwrap();
+        let result = sim.process_command(b"<C1F24>").unwrap();
 
         // FIXED: The expected string is updated to reflect the correct simulated
         // measured values and the resulting fault flags.
         let expected_vi = "#100.00,100.50,100.00,100.50,100.00,100.50,100.00,100.50,100.00,100.50,102.20,100.50,1000,000000000000000000,10000,10000,10000,10000,100,101.11,102.22,1,1000,1000,1000,1000,1000,1000,1000,1000,1#";
-        assert_eq!(response, expected_vi);
+        assert_eq!(result.response, Some(expected_vi.to_string()));
     }
 
     #[test]
@@ -2252,9 +2274,9 @@ mod tests {
 
         // The simulated reading for test 1 will be (5.5+4.5)/2 = 5.0, which should pass (result 0)
         // The simulated reading for test 2 will be 1.0/2 = 0.5, which should pass (result 0)
-        let response = sim.process_command(b"<C1F25>").unwrap().unwrap();
+        let result = sim.process_command(b"<C1F25>").unwrap();
         let expected = "#BBCD,105.00,0,11,102,100.50,0,13,104#";
-        assert_eq!(response, expected);
+        assert_eq!(result.response, Some(expected.to_string()));
     }
 
     #[test]
@@ -2264,8 +2286,8 @@ mod tests {
         let v_command = b"<Vxx0605004003002001>";
         let expected_checksum = 0x06 + 0x05 + 0x004 + 0x003 + 0x002 + 0x001;
         sim.process_command(v_command).unwrap();
-        let end_response = sim.process_command(b"<C1F5003>").unwrap();
-        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+        let end_result = sim.process_command(b"<C1F5003>").unwrap();
+        assert_eq!(end_result.response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
@@ -2286,8 +2308,8 @@ mod tests {
         assert_eq!(psu.sequence_delay, 100);
         assert_eq!(psu.high_voltage_limit, 25.0);
         assert_eq!(psu.low_voltage_limit, 12.5);
-        let end_response = sim.process_command(b"<C1F5003>").unwrap();
-        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+        let end_result = sim.process_command(b"<C1F5003>").unwrap();
+        assert_eq!(end_result.response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
@@ -2307,8 +2329,8 @@ mod tests {
         sim.process_command(t_command).unwrap();
         assert_eq!(sim.timer_values, [s1, s2, s3, s4]);
         assert_eq!(sim.alarm_values, [s5, s6, s7, s8]);
-        let end_response = sim.process_command(b"<C1F5003>").unwrap();
-        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+        let end_result = sim.process_command(b"<C1F5003>").unwrap();
+        assert_eq!(end_result.response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
@@ -2328,8 +2350,8 @@ mod tests {
         assert_eq!(psu.i_cal_val, 16.0);
         assert_eq!(psu.i_cal_offset_val, -16.01);
         assert_eq!(psu.pos_neg_i, 1);
-        let end_response = sim.process_command(b"<C1F5003>").unwrap();
-        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+        let end_result = sim.process_command(b"<C1F5003>").unwrap();
+        assert_eq!(end_result.response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
@@ -2347,8 +2369,8 @@ mod tests {
         let psu = &sim.psus[0];
         assert_eq!(psu.v_cal_offset_val, 0.5);
         assert_eq!(psu.pos_neg_v, 0);
-        let end_response = sim.process_command(b"<C1F5003>").unwrap();
-        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+        let end_result = sim.process_command(b"<C1F5003>").unwrap();
+        assert_eq!(end_result.response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
@@ -2379,8 +2401,8 @@ mod tests {
         assert_eq!(sw.duty_cycle, 0x14);
         assert_eq!(sw.reset_value, 0x0A);
 
-        let end_response = sim.process_command(b"<C1F5003>").unwrap();
-        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+        let end_result = sim.process_command(b"<C1F5003>").unwrap();
+        assert_eq!(end_result.response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
@@ -2415,8 +2437,8 @@ mod tests {
         assert_eq!(config.psu_step_enabled, true);
         assert_eq!(config.psu_step_delay, 500);
 
-        let end_response = sim.process_command(b"<C1F5003>").unwrap();
-        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+        let end_result = sim.process_command(b"<C1F5003>").unwrap();
+        assert_eq!(end_result.response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
@@ -2443,8 +2465,8 @@ mod tests {
         assert_eq!(config.power_up_delay, 10);
         assert_eq!(config.set_point_enabled, true);
 
-        let end_response = sim.process_command(b"<C1F5003>").unwrap();
-        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+        let end_result = sim.process_command(b"<C1F5003>").unwrap();
+        assert_eq!(end_result.response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
@@ -2466,8 +2488,8 @@ mod tests {
         assert_eq!(config.clk32_mon_filter, !0xFFFF);
         assert_eq!(config.clk64_mon_filter, !0xCDAB);
 
-        let end_response = sim.process_command(b"<C1F5003>").unwrap();
-        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+        let end_result = sim.process_command(b"<C1F5003>").unwrap();
+        assert_eq!(end_result.response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
@@ -2500,8 +2522,8 @@ mod tests {
         assert_eq!(config.seq_off_delay_1, 100);
         assert_eq!(config.seq_on_delay_1, 100);
 
-        let end_response = sim.process_command(b"<C1F5003>").unwrap();
-        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+        let end_result = sim.process_command(b"<C1F5003>").unwrap();
+        assert_eq!(end_result.response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
@@ -2525,8 +2547,8 @@ mod tests {
         assert_eq!(p_loop.end_address, 0xFF);
         assert_eq!(p_loop.count, 0x0A);
 
-        let end_response = sim.process_command(b"<C1F5003>").unwrap();
-        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+        let end_result = sim.process_command(b"<C1F5003>").unwrap();
+        assert_eq!(end_result.response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
@@ -2553,8 +2575,8 @@ mod tests {
         assert_eq!(clock.source, 0);
         assert_eq!(sim.loop_enables, 0x0F);
 
-        let end_response = sim.process_command(b"<C1F5003>").unwrap();
-        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+        let end_result = sim.process_command(b"<C1F5003>").unwrap();
+        assert_eq!(end_result.response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
@@ -2580,8 +2602,8 @@ mod tests {
         assert_eq!(sim.repeat_count_1, 0x05060708);
         assert_eq!(sim.repeat_count_2, 0x01020304);
 
-        let end_response = sim.process_command(b"<C1F5003>").unwrap();
-        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+        let end_result = sim.process_command(b"<C1F5003>").unwrap();
+        assert_eq!(end_result.response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
@@ -2607,8 +2629,8 @@ mod tests {
         assert_eq!(sim.frc_config.frequency_1_4, 0x05060708);
         assert_eq!(sim.frc_config.frequency_5_8, 0x01020304);
 
-        let end_response = sim.process_command(b"<C1F5003>").unwrap();
-        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+        let end_result = sim.process_command(b"<C1F5003>").unwrap();
+        assert_eq!(end_result.response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
@@ -2634,8 +2656,8 @@ mod tests {
         assert_eq!(sim.frc_config.period_1_4, 0x55667788);
         assert_eq!(sim.frc_config.period_5_8, 0x11223344);
 
-        let end_response = sim.process_command(b"<C1F5003>").unwrap();
-        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+        let end_result = sim.process_command(b"<C1F5003>").unwrap();
+        assert_eq!(end_result.response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
@@ -2661,8 +2683,8 @@ mod tests {
         assert_eq!(sim.frc_config.source_1_4, 0x05060708);
         assert_eq!(sim.frc_config.source_5_8, 0x01020304);
 
-        let end_response = sim.process_command(b"<C1F5003>").unwrap();
-        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+        let end_result = sim.process_command(b"<C1F5003>").unwrap();
+        assert_eq!(end_result.response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
@@ -2684,8 +2706,8 @@ mod tests {
 
         assert_eq!(sim.output_routing[8], 0x04030201); // Group 9 is index 8
 
-        let end_response = sim.process_command(b"<C1F5003>").unwrap();
-        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+        let end_result = sim.process_command(b"<C1F5003>").unwrap();
+        assert_eq!(end_result.response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
@@ -2718,8 +2740,8 @@ mod tests {
         assert_eq!(sim.fpgas[0].pattern_memory_a[4], data4);
         assert_eq!(sim.sram_address, 5);
 
-        let end_response = sim.process_command(b"<C1F5001>").unwrap();
-        assert_eq!(end_response, Some(format!("#{},5,#", checksum)));
+        let end_result = sim.process_command(b"<C1F5001>").unwrap();
+        assert_eq!(end_result.response, Some(format!("#{},5,#", checksum)));
     }
 
     #[test]
@@ -2750,8 +2772,8 @@ mod tests {
         assert_eq!(sim.fpgas[1].pattern_memory_a[2], data2b);
         assert_eq!(sim.sram_address, 3);
 
-        let end_response = sim.process_command(b"<C1F5001>").unwrap();
-        assert_eq!(end_response, Some(format!("#{},3,#", checksum)));
+        let end_result = sim.process_command(b"<C1F5001>").unwrap();
+        assert_eq!(end_result.response, Some(format!("#{},3,#", checksum)));
     }
 
     #[test]
@@ -2777,8 +2799,8 @@ mod tests {
         assert_eq!(psu.ustep_steps, 100);
         assert_eq!(psu.ustep_delay, 200);
 
-        let end_response = sim.process_command(b"<C1F5003>").unwrap();
-        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+        let end_result = sim.process_command(b"<C1F5003>").unwrap();
+        assert_eq!(end_result.response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
@@ -2801,8 +2823,8 @@ mod tests {
         assert_eq!(sim.ptc_config.on_time_seconds, 10 * 60);
         assert_eq!(sim.ptc_config.off_time_seconds, 30 * 60);
 
-        let end_response = sim.process_command(b"<C1F5003>").unwrap();
-        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+        let end_result = sim.process_command(b"<C1F5003>").unwrap();
+        assert_eq!(end_result.response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
@@ -2825,8 +2847,8 @@ mod tests {
         assert_eq!(sim.ptc_config.on_time_seconds, 60);
         assert_eq!(sim.ptc_config.off_time_seconds, 180);
 
-        let end_response = sim.process_command(b"<C1F5003>").unwrap();
-        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+        let end_result = sim.process_command(b"<C1F5003>").unwrap();
+        assert_eq!(end_result.response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
@@ -2860,8 +2882,8 @@ mod tests {
         assert_eq!(test.tp2_amon_mux_b, s1);
         assert_eq!(test.psu_link, s9);
 
-        let end_response = sim.process_command(b"<C1F5003>").unwrap();
-        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+        let end_result = sim.process_command(b"<C1F5003>").unwrap();
+        assert_eq!(end_result.response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
@@ -2887,8 +2909,8 @@ mod tests {
         assert_eq!(test.tp2_gain, 2.0);
         assert_eq!(test.sum_gain, 3.0);
 
-        let end_response = sim.process_command(b"<C1F5003>").unwrap();
-        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+        let end_result = sim.process_command(b"<C1F5003>").unwrap();
+        assert_eq!(end_result.response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
@@ -2936,12 +2958,12 @@ mod tests {
         assert_eq!(test4.tp2_discharge_time, 0xC8);
         assert_eq!(test4.unit_type, 0x0A);
 
-        let end_response = sim.process_command(b"<C1F5003>").unwrap();
+        let end_result = sim.process_command(b"<C1F5003>").unwrap();
         let expected_checksum = (0x01 + 0x01 + 0x0A + 0x0B + 0x0C + 0x0D + 0x01) +
             (0x02 + 0x02 + 0x14 + 0x32 + 0x1E + 0x64 + 0x05) +
             (0x03 + 0x03 + 0x01 + 0x02 + 0x03 + 0x04 + 0x0F) +
             (0x04 + 0x04 + 0x19 + 0x64 + 0x21 + 0xC8 + 0x0A);
-        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+        assert_eq!(end_result.response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
@@ -2969,7 +2991,7 @@ mod tests {
         sim.process_command(i_command7).unwrap();
         assert_eq!(sim.amon_tests[1].low_limit, 0.1);
 
-        let end_response = sim.process_command(b"<C1F5003>").unwrap();
+        let end_result = sim.process_command(b"<C1F5003>").unwrap();
 
         let checksum1 = 4 + 1 + (0x3+0xF+0xA+0+0+0+0+0);
         let checksum2 = 5 + 1 + (0xB+0xF+0+0+0+0+0+0);
@@ -2977,7 +2999,7 @@ mod tests {
         let checksum4 = 7 + 2 + (0x3+0xD+0xC+0xC+0xC+0xC+0xC+0xD);
         let expected_checksum = checksum1 + checksum2 + checksum3 + checksum4;
 
-        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+        assert_eq!(end_result.response, Some(format!("#{}#", expected_checksum)));
     }
 
     #[test]
@@ -3003,7 +3025,7 @@ mod tests {
         assert_eq!(test.board, 10);
         assert_eq!(test.tag, 11);
 
-        let end_response = sim.process_command(b"<C1F5003>").unwrap();
-        assert_eq!(end_response, Some(format!("#{}#", expected_checksum)));
+        let end_result = sim.process_command(b"<C1F5003>").unwrap();
+        assert_eq!(end_result.response, Some(format!("#{}#", expected_checksum)));
     }
 }

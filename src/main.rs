@@ -3,7 +3,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ez_sim_lib::{CommandError, Simulator};
+use ez_sim_lib::{CommandError, Simulator, ProcessResult};
 use ratatui::{prelude::*, widgets::*};
 use std::{
     io::{self, Write},
@@ -100,10 +100,16 @@ impl<'a> App<'a> {
     fn process_command(&mut self, command: &str) {
         self.log(format!("> {}", command));
         match self.simulator.process_command(command.as_bytes()) {
-            Ok(Some(response)) => {
-                self.log(format!("< {}", response));
+            Ok(result) => {
+                // First, log any debug messages from the simulator
+                for debug_log in result.logs {
+                    self.log(debug_log);
+                }
+                // Then, log the actual response if it exists
+                if let Some(response) = result.response {
+                    self.log(format!("< {}", response));
+                }
             }
-            Ok(None) => {}
             Err(e) => {
                 let error_msg = match e {
                     CommandError::InvalidFrame => "Invalid command frame. A valid command must be enclosed in '<...>'.".to_string(),
@@ -388,13 +394,19 @@ fn handle_serial_select_input(app: &mut App<'_>, key: event::KeyEvent) {
                                 if !command_str.is_empty() {
                                     tx.send(SerialMessage::Log(format!("> {}", command_str))).unwrap();
                                     match simulator_clone.process_command(command_str.as_bytes()) {
-                                        Ok(Some(response)) => {
-                                            tx.send(SerialMessage::Log(format!("< {}", response))).unwrap();
-                                            if let Err(e) = port.write_all(response.as_bytes()) {
-                                                tx.send(SerialMessage::Error(format!("Failed to write to port: {}", e))).unwrap();
+                                        Ok(result) => {
+                                            // Send any debug logs
+                                            for debug_log in result.logs {
+                                                tx.send(SerialMessage::Log(debug_log)).unwrap();
+                                            }
+                                            // Handle the actual response
+                                            if let Some(response) = result.response {
+                                                tx.send(SerialMessage::Log(format!("< {}", response))).unwrap();
+                                                if let Err(e) = port.write_all(response.as_bytes()) {
+                                                    tx.send(SerialMessage::Error(format!("Failed to write to port: {}", e))).unwrap();
+                                                }
                                             }
                                         }
-                                        Ok(None) => {}
                                         Err(e) => {
                                             tx.send(SerialMessage::Log(format!("[ERROR] {:?}", e))).unwrap();
                                         }

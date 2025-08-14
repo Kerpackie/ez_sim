@@ -161,6 +161,14 @@ pub struct Fpga {
     pub pattern_memory_b: Vec<u32>,
     pub tristate_memory_a: Vec<u32>,
     pub tristate_memory_b: Vec<u32>,
+    // NEW: Fields for Timing Generator (TG)
+    pub tg_memory: Vec<u32>,
+    pub loop_repeat_vector: u32,
+    pub loop_repeat_start: u32,
+    pub loop_stop_vector: u32,
+    pub tg_comparator_data: u32,
+    pub clk_mon_strobe_val: u32,
+    pub loop_addr_cntr: u32,
 }
 
 impl Default for Fpga {
@@ -179,6 +187,14 @@ impl Default for Fpga {
             pattern_memory_b: vec![0; 0x100000],
             tristate_memory_a: vec![0; 0x100000],
             tristate_memory_b: vec![0; 0x100000],
+            // NEW: Initialize TG fields
+            tg_memory: vec![0; 256], // Assuming a size of 256 for TG SRAM
+            loop_repeat_vector: 0,
+            loop_repeat_start: 0,
+            loop_stop_vector: 0,
+            tg_comparator_data: 0,
+            clk_mon_strobe_val: 0,
+            loop_addr_cntr: 0,
         }
     }
 }
@@ -1749,24 +1765,93 @@ impl Simulator {
         Ok(())
     }
 
-    /// Parses an 'O' command, updates output routing, and updates the checksum.
+    /// Parses an 'O' command, which has multiple variants for updating output routing or TG data.
     fn handle_o_command(&mut self, content_bytes: &[u8]) -> Result<(), CommandError> {
         let content = std::str::from_utf8(content_bytes).map_err(|_| CommandError::InvalidParameter)?;
-        if content.len() < 13 { return Err(CommandError::TooShort); }
+        // Minimum length to parse the command group ID
+        if content.len() < 5 { return Err(CommandError::TooShort); }
         let parse_hex = |start, end| u32::from_str_radix(&content[start..end], 16).map_err(|_| CommandError::InvalidParameter);
 
-        let sram1_group = parse_hex(3, 5)? as usize;
-        let sram2 = parse_hex(5, 7)?;
-        let sram3 = parse_hex(7, 9)?;
-        let sram4 = parse_hex(9, 11)?;
-        let sram5 = parse_hex(11, 13)?;
+        let sram1_group = parse_hex(3, 5)?;
 
-        if sram1_group > 0 && sram1_group <= self.output_routing.len() {
-            let routing_value = u32::from_le_bytes([sram2 as u8, sram3 as u8, sram4 as u8, sram5 as u8]);
-            self.output_routing[sram1_group - 1] = routing_value;
+        if sram1_group < 0xF0 {
+            // --- Variant 1: Standard Output Routing (Existing Logic) ---
+            if content.len() < 13 { return Err(CommandError::TooShort); }
+
+            let sram2 = parse_hex(5, 7)?;
+            let sram3 = parse_hex(7, 9)?;
+            let sram4 = parse_hex(9, 11)?;
+            let sram5 = parse_hex(11, 13)?;
+
+            if (sram1_group as usize) > 0 && (sram1_group as usize) <= self.output_routing.len() {
+                // The C firmware assembles the final value from bytes in little-endian order.
+                let routing_value = u32::from_le_bytes([sram2 as u8, sram3 as u8, sram4 as u8, sram5 as u8]);
+                self.output_routing[(sram1_group - 1) as usize] = routing_value;
+            }
+
+            self.update_driver_checksum(sram1_group + sram2 + sram3 + sram4 + sram5);
+
+        } else if sram1_group == 0xFE {
+            // --- Variant 2: TG MAIN LOOP DATA ---
+            if content.len() < 20 { return Err(CommandError::TooShort); }
+            // The C code parses these as 5-digit hex numbers made from individual chars.
+            let sram2_loop_stop = parse_hex(5, 10)?;
+            let sram3_loop_repeat = parse_hex(10, 15)?;
+            let sram4_loop_start = parse_hex(15, 20)?;
+
+            // Update simulator state with the parsed loop data.
+            // The C code writes to FPGA1 registers. We'll mirror this for both FPGAs if present.
+            for fpga in self.fpgas.iter_mut().filter(|f| f.present) {
+                fpga.loop_stop_vector = sram2_loop_stop;
+                fpga.loop_repeat_vector = sram3_loop_repeat;
+                fpga.loop_repeat_start = sram4_loop_start;
+            }
+
+            // CRITICAL: This variant has a unique checksum logic. It sums the integer
+            // value of each hex character individually from index 5 to 19.
+            let checksum_chars = &content[5..20];
+            let char_sum = checksum_chars.chars().fold(0, |acc, c| {
+                acc + c.to_digit(16).unwrap_or(0)
+            });
+            self.update_driver_checksum(sram1_group + char_sum);
+
+        } else if sram1_group == 0xFF {
+            // --- Variant 3: TG SRAM DATA ---
+            if content.len() < 21 { return Err(CommandError::TooShort); }
+
+            let sram2_addr = parse_hex(5, 7)? as usize;
+            let sram3_data1 = parse_hex(7, 9)?;
+            let sram4_data2 = parse_hex(9, 11)?;
+            let sram5_data3 = parse_hex(11, 13)?;
+            let sram6_data4 = parse_hex(13, 15)?;
+            let sram7_comp_data = parse_hex(15, 17)?;
+            let sram8_strobe_val = parse_hex(17, 19)?;
+            let sram9_loop_addr = parse_hex(19, 21)?;
+
+            // Update simulator state with TG SRAM data.
+            // The C code calls `Write_TG_memoryA` four times for consecutive addresses.
+            for fpga in self.fpgas.iter_mut().filter(|f| f.present) {
+                if sram2_addr + 3 < fpga.tg_memory.len() {
+                    fpga.tg_memory[sram2_addr] = sram3_data1;
+                    fpga.tg_memory[sram2_addr + 1] = sram4_data2;
+                    fpga.tg_memory[sram2_addr + 2] = sram5_data3;
+                    fpga.tg_memory[sram2_addr + 3] = sram6_data4;
+                }
+
+                // If address is 0, also update other TG registers.
+                if sram2_addr == 0 {
+                    fpga.tg_comparator_data = sram7_comp_data;
+                    fpga.clk_mon_strobe_val = sram8_strobe_val;
+                    fpga.loop_addr_cntr = sram9_loop_addr;
+                }
+            }
+
+            self.update_driver_checksum(sram1_group + sram2_addr as u32 + sram3_data1 + sram4_data2 + sram5_data3 + sram6_data4 + sram7_comp_data + sram8_strobe_val + sram9_loop_addr);
+
+        } else {
+            return Err(CommandError::InvalidParameter);
         }
 
-        self.update_driver_checksum(sram1_group as u32 + sram2 + sram3 + sram4 + sram5);
         Ok(())
     }
 
@@ -2137,7 +2222,7 @@ mod tests {
         sim.prog_id_lint = 456;
 
         // Command for full memory test (nDATA = 0)
-        let result = sim.process_command(b"<C1F190000000000000000>").unwrap();
+        let result = sim.process_command(b"<C1F1900000000000000000>").unwrap();
         assert_eq!(result.response, Some(String::from("#OK#")));
 
         // Verify state changes
